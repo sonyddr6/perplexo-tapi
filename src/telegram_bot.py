@@ -469,6 +469,16 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             data = response.json()
         
         answer = data.get('answer', 'Sem resposta')
+        thinking = data.get('thinking')
+        
+        # Se tem thinking (raciocínio), mostra primeiro
+        if thinking and data.get('has_thinking'):
+            thinking_text = f"🧠 *Raciocínio interno:*\n_{thinking[:1500]}{'...' if len(thinking) > 1500 else ''}_\n\n---\n\n"
+            await update.message.reply_text(
+                thinking_text,
+                parse_mode='Markdown',
+                disable_web_page_preview=True
+            )
         
         # Adiciona citações se ativado
         if config['return_citations'] and data.get('citations'):
@@ -479,7 +489,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 answer += f"{i}. [{title}]({url})\n"
         
         # Badge de metadados
-        answer += f"\n_🤖 {data.get('model_used', config['model'])} | 🔍 {data.get('focus_mode', config['focus'])}_"
+        thinking_badge = "🧠 " if data.get('has_thinking') else ""
+        answer += f"\n_{thinking_badge}🤖 {data.get('model_used', config['model'])} | 🔍 {data.get('focus_mode', config['focus'])}_"
         
         await update.message.reply_text(
             answer,

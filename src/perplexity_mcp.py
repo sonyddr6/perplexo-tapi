@@ -281,9 +281,39 @@ def search():
         # Extrai resposta
         answer = conversation.answer if hasattr(conversation, 'answer') else str(conversation)
         
+        # Extrai thinking (raciocínio) se disponível - para modelos THINKING
+        thinking = None
+        raw_data = getattr(conversation, 'raw_data', {}) if hasattr(conversation, 'raw_data') else {}
+        
+        # Tenta extrair thinking de vários lugares possíveis
+        if raw_data:
+            thinking = raw_data.get('thinking') or raw_data.get('reasoning') or raw_data.get('thought_process')
+            
+            # Alguns modelos colocam em 'steps' ou 'chain_of_thought'
+            if not thinking:
+                steps = raw_data.get('steps', [])
+                if steps and isinstance(steps, list):
+                    thinking_steps = [s.get('content', '') for s in steps if s.get('type') in ['thinking', 'reasoning']]
+                    if thinking_steps:
+                        thinking = '\n'.join(thinking_steps)
+            
+            # Claude coloca em 'internal_reasoning' às vezes
+            if not thinking:
+                thinking = raw_data.get('internal_reasoning')
+        
         # Extrai citações se disponíveis
         citations = []
-        if hasattr(conversation, 'sources') and conversation.sources:
+        search_results = getattr(conversation, 'search_results', []) if hasattr(conversation, 'search_results') else []
+        if search_results:
+            for src in search_results:
+                citations.append({
+                    "title": getattr(src, 'title', 'Fonte'),
+                    "url": getattr(src, 'url', ''),
+                    "snippet": getattr(src, 'snippet', '')
+                })
+        
+        # Fallback para sources (versões antigas)
+        if not citations and hasattr(conversation, 'sources') and conversation.sources:
             for src in conversation.sources:
                 citations.append({
                     "title": getattr(src, 'title', 'Fonte'),
@@ -293,9 +323,11 @@ def search():
         
         response = {
             "answer": answer,
+            "thinking": thinking,  # Novo campo para raciocínio
             "model_used": model_id,
             "focus_mode": focus_id,
-            "citations": citations
+            "citations": citations,
+            "has_thinking": thinking is not None
         }
         
         return jsonify(response)
