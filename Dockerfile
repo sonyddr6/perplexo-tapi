@@ -21,8 +21,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Instala o scraper do Perplexity
 RUN pip install --no-cache-dir git+https://github.com/henrique-coder/perplexity-webui-scraper
 
+# Cria diretórios necessários
+RUN mkdir -p /app/logs /app/config /app/auth_info_baileys
+
 # Copia código fonte
 COPY src/ ./src/
+
+# Copia configurações (se existirem)
+COPY config/ ./config/ 2>/dev/null || true
 
 # Variáveis de ambiente
 ENV PYTHONUNBUFFERED=1
