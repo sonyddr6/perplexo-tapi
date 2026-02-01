@@ -1,33 +1,63 @@
 # ==============================
 # Perplexo Bot - Docker Compose
 # ==============================
-# Sobe todos os serviços de uma vez
+# Com VPN NordVPN integrada
 
 services:
-  # Python: MCP Server + Telegram Bot
+  # ========== VPN Container (Gluetun + NordVPN) ==========
+  vpn:
+    image: qmcgaw/gluetun
+    container_name: perplexo-vpn
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      # NordVPN Config
+      - VPN_SERVICE_PROVIDER=nordvpn
+      - VPN_TYPE=openvpn
+      - OPENVPN_USER=RG5Bu4zk65oGoaZCCvjHPoA7
+      - OPENVPN_PASSWORD=6PHiumBF47ezWsxLTt33bTWA
+      # Servidor Brasil
+      - SERVER_COUNTRIES=Brazil
+    ports:
+      - "5000:5000"
+      - "8000:8000"
+    volumes:
+      - ./gluetun:/gluetun
+    restart: unless-stopped
+    networks:
+      - perplexo-net
+    healthcheck:
+      test: [ "CMD", "wget", "-q", "--spider", "http://ipinfo.io" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ========== Python: MCP Server + Telegram Bot ==========
   perplexo-bot:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: perplexo-bot
+    network_mode: "service:vpn"
+    depends_on:
+      vpn:
+        condition: service_healthy
     restart: unless-stopped
     env_file:
       - .env
     environment:
       - MCP_PORT=5000
       - TELEGRAM_PORT=8000
-      - MCP_API_URL=http://perplexo-bot:5000
-    ports:
-      - "5000:5000" # MCP Server
-      - "8000:8000" # Telegram Webhook (se usar)
+      - MCP_API_URL=http://127.0.0.1:5000
     volumes:
       - ./logs:/app/logs
       - ./config:/app/config
       - ./auth_info_baileys:/app/auth_info_baileys
-    networks:
-      - perplexo-net
 
-  # Node.js: WhatsApp Bot (opcional)
+  # ========== Node.js: WhatsApp Bot (opcional) ==========
   whatsapp-bot:
     build:
       context: .
@@ -37,7 +67,7 @@ services:
     env_file:
       - .env
     environment:
-      - MCP_API_URL=http://perplexo-bot:5000
+      - MCP_API_URL=http://perplexo-vpn:5000
     volumes:
       - ./auth_info_baileys:/app/auth_info_baileys
     depends_on:
@@ -45,7 +75,7 @@ services:
     networks:
       - perplexo-net
     profiles:
-      - whatsapp # Só sobe se usar: docker-compose --profile whatsapp up
+      - whatsapp
 
 networks:
   perplexo-net:
