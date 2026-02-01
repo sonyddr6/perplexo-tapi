@@ -1,0 +1,50 @@
+# ==============================
+# Perplexo Bot - Docker Compose
+# ==============================
+# Sobe todos os serviços de uma vez
+
+services:
+  # Python: MCP Server + Telegram Bot
+  perplexo-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: perplexo-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - MCP_PORT=5000
+      - TELEGRAM_PORT=8000
+      - MCP_API_URL=http://127.0.0.1:5000
+    ports:
+      - "5000:5000"   # MCP Server
+      - "8000:8000"   # Telegram Webhook (se usar)
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - perplexo-net
+
+  # Node.js: WhatsApp Bot (opcional)
+  whatsapp-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.whatsapp
+    container_name: perplexo-whatsapp
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - MCP_API_URL=http://perplexo-bot:5000
+    volumes:
+      - ./auth_info_baileys:/app/auth_info_baileys
+    depends_on:
+      - perplexo-bot
+    networks:
+      - perplexo-net
+    profiles:
+      - whatsapp  # Só sobe se usar: docker-compose --profile whatsapp up
+
+networks:
+  perplexo-net:
+    driver: bridge

@@ -1,0 +1,22 @@
+# ===========================
+# Perplexo Bot - WhatsApp
+# ===========================
+# Node.js container para Baileys
+
+FROM node:20-slim
+
+WORKDIR /app
+
+# Copia package.json
+COPY package*.json ./
+
+# Instala dependências
+RUN npm ci --omit=dev
+
+# Copia código fonte
+COPY src/whatsapp_bot.js ./src/
+
+# Variáveis de ambiente
+ENV NODE_ENV=production
+
+CMD ["node", "src/whatsapp_bot.js"]

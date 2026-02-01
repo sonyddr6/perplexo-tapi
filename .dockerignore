@@ -1,0 +1,12 @@
+# Ignores para Docker build
+node_modules/
+auth_info_baileys/
+logs/
+.env
+*.log
+__pycache__/
+*.pyc
+.git/
+.gitignore
+README.md
+*.md
