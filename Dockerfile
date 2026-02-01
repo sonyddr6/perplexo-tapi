@@ -27,8 +27,8 @@ RUN mkdir -p /app/logs /app/config /app/auth_info_baileys
 # Copia código fonte
 COPY src/ ./src/
 
-# Copia configurações (se existirem)
-COPY config/ ./config/ 2>/dev/null || true
+# O diretório config será mapeado via volume no docker-compose.yml
+# Não precisa copiar aqui
 
 # Variáveis de ambiente
 ENV PYTHONUNBUFFERED=1
