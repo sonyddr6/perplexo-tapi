@@ -123,6 +123,7 @@ async def post_init(application: Application) -> None:
         BotCommand("modelos", "🤖 Escolher Modelo AI"),
         BotCommand("busca", "🔍 Modo de Busca (Focus)"),
         BotCommand("new", "✨ Nova Conversa"),
+        BotCommand("library", "📚 Save Cloud (Toggle)"),
         BotCommand("historico", "📂 Histórico salvo"),
         BotCommand("teste", "🕵️ Diagnóstico"),
         BotCommand("importar", "📥 Importar Contexto"),
@@ -596,6 +597,32 @@ async def cmd_historico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("❌ Erro ao buscar histórico.", parse_mode='Markdown')
 
 
+# ============= COMANDO /library =============
+
+async def cmd_library(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Alterna o modo Save to Library (Nuvem)"""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # POST faz o toggle
+            response = await client.post(f"{MCP_API}/config/library")
+            data = response.json()
+            
+            enabled = data.get('enabled', False)
+            msg = data.get('message', '')
+            
+            # Feedback com emoji
+            if enabled:
+                text = f"☁️ *{msg}*\n\n⚠️ Atenção: Se estiver usando VPN/Datacenter, isso pode gerar erro 403 (Token Inválido).\nSe der ruim, use `/library` de novo para desativar."
+            else:
+                text = f"🏠 *{msg}*\n\nModo seguro (Local) ativado. Conversas salvas apenas no JSON interno."
+            
+            await update.message.reply_text(text, parse_mode='Markdown')
+            
+    except Exception as e:
+        logger.error(f"Erro library toggle: {e}")
+        await update.message.reply_text("❌ Erro ao alterar configuração.", parse_mode='Markdown')
+
+
 # ============= COMANDO /teste =============
 
 async def cmd_teste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -950,7 +977,7 @@ def main() -> None:
     app.add_handler(CommandHandler("modelos", cmd_modelos))
     app.add_handler(CommandHandler("busca", cmd_busca))
     app.add_handler(CommandHandler("new", cmd_new))
-    app.add_handler(CommandHandler("new", cmd_new))
+    app.add_handler(CommandHandler("library", cmd_library))
     app.add_handler(CommandHandler("historico", cmd_historico))
     app.add_handler(CommandHandler("teste", cmd_teste))
     app.add_handler(CommandHandler("importar", cmd_importar))

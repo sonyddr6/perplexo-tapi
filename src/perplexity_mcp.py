@@ -113,6 +113,7 @@ if SCRAPER_AVAILABLE and Perplexity and PERPLEXITY_SESSION_TOKEN and PERPLEXITY_
 active_conversations: Dict[str, Any] = {}
 conversation_message_counts: Dict[str, int] = {}
 conversation_messages: Dict[str, List[Dict[str, str]]] = {}  # Armazena mensagens para salvar
+SAVE_TO_LIBRARY_ENABLED = False  # Default: False (Evita erro 403 na VPN)
 
 # Diretório para salvar conversas
 CONVERSATIONS_DIR = Path(os.getenv("CONVERSATIONS_DIR", "./data/conversations"))
@@ -382,11 +383,12 @@ def search():
         
         if conversation is None:
             # Cria nova conversa para o usuário
+            # Configuração da conversa
             config_kwargs = {
                 "model": model_enum,
                 "citation_mode": citation_enum,
                 "language": "pt-BR",
-                #"save_to_library": True  # DESABILITADO: Causa erro 403 na VPN
+                "save_to_library": SAVE_TO_LIBRARY_ENABLED
             }
             
             # Adiciona source_focus apenas se disponível
@@ -642,6 +644,42 @@ def history_delete():
     return jsonify({"success": success})
 
 
+@app.route('/config/library', methods=['GET', 'POST'])
+def config_library():
+    """
+    GET: Retorna estado atual do save_to_library
+    POST: Inverte estado (toggle) e retorna novo
+    """
+    global SAVE_TO_LIBRARY_ENABLED
+    
+    if request.method == 'POST':
+        SAVE_TO_LIBRARY_ENABLED = not SAVE_TO_LIBRARY_ENABLED
+        logger.info(f"[CONFIG] Save to Library alterado para: {SAVE_TO_LIBRARY_ENABLED}")
+        
+    return jsonify({
+        "enabled": SAVE_TO_LIBRARY_ENABLED,
+        "message": "Save to Library ATIVADO" if SAVE_TO_LIBRARY_ENABLED else "Save to Library DESATIVADO"
+    })
+
+
+@app.route('/config/library', methods=['GET', 'POST'])
+def config_library():
+    """
+    GET: Retorna estado atual do save_to_library
+    POST: Inverte estado (toggle) e retorna novo
+    """
+    global SAVE_TO_LIBRARY_ENABLED
+    
+    if request.method == 'POST':
+        SAVE_TO_LIBRARY_ENABLED = not SAVE_TO_LIBRARY_ENABLED
+        logger.info(f"[CONFIG] Save to Library alterado para: {SAVE_TO_LIBRARY_ENABLED}")
+        
+    return jsonify({
+        "enabled": SAVE_TO_LIBRARY_ENABLED,
+        "message": "Save to Library ATIVADO" if SAVE_TO_LIBRARY_ENABLED else "Save to Library DESATIVADO"
+    })
+
+
 @app.route('/vision', methods=['POST'])
 @limiter.limit("10 per minute")
 def vision():
@@ -723,15 +761,14 @@ def diagnostics():
     
     # 1. Checa IP Público
     try:
-        import requests
+        import urllib.request
         try:
-            ip_resp = requests.get('https://api.ipify.org', timeout=5)
-            if ip_resp.status_code == 200:
-                result['public_ip'] = ip_resp.text
+            with urllib.request.urlopen('https://api.ipify.org', timeout=5) as response:
+                result['public_ip'] = response.read().decode('utf-8')
         except:
              # Fallback
-             ip_resp = requests.get('https://ifconfig.me/ip', timeout=5)
-             result['public_ip'] = ip_resp.text.strip()
+             with urllib.request.urlopen('https://ifconfig.me/ip', timeout=5) as response:
+                result['public_ip'] = response.read().decode('utf-8').strip()
              
     except Exception as e:
         result['public_ip'] = f"Error: {str(e)}"
