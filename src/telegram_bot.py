@@ -124,6 +124,7 @@ async def post_init(application: Application) -> None:
         BotCommand("busca", "🔍 Modo de Busca (Focus)"),
         BotCommand("new", "✨ Nova Conversa"),
         BotCommand("library", "📚 Save Cloud (Toggle)"),
+        BotCommand("token", "🔑 Atualizar Token"),
         BotCommand("historico", "📂 Histórico salvo"),
         BotCommand("teste", "🕵️ Diagnóstico"),
         BotCommand("importar", "📥 Importar Contexto"),
@@ -623,6 +624,41 @@ async def cmd_library(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("❌ Erro ao alterar configuração.", parse_mode='Markdown')
 
 
+# ============= COMANDO /token =============
+async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Atualiza o Token de Sessão Dinamicamente"""
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        await update.message.reply_text("⚠️ Use: `/token <seu_novo_token_aqui>`")
+        return
+        
+    token = context.args[0]
+    
+    # Tenta apagar a mensagem do usuário por segurança
+    try:
+        await update.message.delete()
+    except:
+        pass # Pode não ter permissão
+        
+    msg = await update.message.reply_text("🔑 *Atualizando Token...*", parse_mode='Markdown')
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(f"{MCP_API}/config/token", json={"token": token})
+            
+            if response.status_code == 200:
+                await msg.edit_text("✅ *Token Atualizado com Sucesso!*\nExecutando diagnóstico automático...", parse_mode='Markdown')
+                # Chama o diagnóstico
+                await cmd_teste(update, context)
+            else:
+                await msg.edit_text(f"❌ Erro ao atualizar: {response.text}", parse_mode='Markdown')
+                
+    except Exception as e:
+        logger.error(f"Erro token update: {e}")
+        await msg.edit_text("❌ Erro de conexão com MCP.", parse_mode='Markdown')
+
+
 # ============= COMANDO /teste =============
 
 async def cmd_teste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -977,7 +1013,9 @@ def main() -> None:
     app.add_handler(CommandHandler("modelos", cmd_modelos))
     app.add_handler(CommandHandler("busca", cmd_busca))
     app.add_handler(CommandHandler("new", cmd_new))
+    app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("library", cmd_library))
+    app.add_handler(CommandHandler("token", cmd_token))
     app.add_handler(CommandHandler("historico", cmd_historico))
     app.add_handler(CommandHandler("teste", cmd_teste))
     app.add_handler(CommandHandler("importar", cmd_importar))

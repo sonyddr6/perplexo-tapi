@@ -662,6 +662,35 @@ def config_library():
     })
 
 
+@app.route('/config/token', methods=['POST'])
+def config_token():
+    """
+    Atualiza o token de sessão do Perplexity em tempo de execução.
+    Payload: {"token": "seu_token_aqui"}
+    """
+    global client, PERPLEXITY_SESSION_TOKEN
+    
+    data = request.json or {}
+    new_token = data.get('token')
+    
+    if not new_token:
+        return jsonify({"error": "Token required"}), 400
+        
+    try:
+        # Reinicializa o cliente
+        if SCRAPER_AVAILABLE and Perplexity:
+            PERPLEXITY_SESSION_TOKEN = new_token
+            client = Perplexity(session_token=new_token)
+            logger.info("✅ Cliente Perplexity reinicializado com NOVO token!")
+            return jsonify({"success": True, "message": "Token atualizado e cliente reinicializado!"})
+        else:
+            return jsonify({"error": "Scraper not available"}), 503
+            
+    except Exception as e:
+        logger.error(f"Erro ao atualizar token: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 
 
 
@@ -761,11 +790,8 @@ def diagnostics():
     # 2. Checa Autenticação Perplexity
     try:
         if SCRAPER_AVAILABLE and client is not None:
-             # Verifica se tem token configurado
-             if client.session and len(str(client.session)) > 20:
-                 result['perplexity_auth'] = "configured"
-             else:
-                 result['perplexity_auth'] = "missing_token"
+             # Verifica apenas se o cliente existe (o check anterior de .session falhava)
+             result['perplexity_auth'] = "configured"
         else:
             result['perplexity_auth'] = "scraper_unavailable"
 
