@@ -122,8 +122,12 @@ async def post_init(application: Application) -> None:
         BotCommand("start", "🏠 Menu Principal"),
         BotCommand("modelos", "🤖 Escolher Modelo AI"),
         BotCommand("busca", "🔍 Modo de Busca (Focus)"),
+        BotCommand("new", "✨ Nova Conversa"),
+        BotCommand("historico", "📂 Histórico salvo"),
+        BotCommand("importar", "📥 Importar Contexto"),
         BotCommand("normal", "💬 Conversa Normal"),
         BotCommand("config", "⚙️ Configurações"),
+        BotCommand("limpar", "🗑️ Limpar Histórico"),
         BotCommand("ajuda", "❓ Guia de Uso")
     ]
     await application.bot.set_my_commands(commands)
@@ -335,11 +339,16 @@ async def cmd_ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• `/modelos` - Escolher modelo AI\n"
         "• `/busca` - Modo de busca (Focus)\n"
         "• `/normal` - Conversa casual\n"
-        "• `/config` - Configurações avançadas\n\n"
+        "• `/config` - Configurações avançadas\n"
+        "• `/limpar` - Limpar histórico de conversa\n\n"
         "*Recursos:*\n"
         "• Envie texto para perguntas\n"
         "• Envie imagens para análise visual\n"
         "• Envie arquivos .txt para resumir\n\n"
+        "*Histórico:*\n"
+        "💬 Conversas salvas automaticamente ao usar `/new` ou `/limpar`.\n"
+        "• `/historico` - Lista conversas antigas\n"
+        "• `/importar <ID>` - Importa conversa antiga como contexto atual\n\n"
         "*Modelos disponíveis:*\n"
         "⚡ Sonar - Rápido, ideal para Q&A\n"
         "🔥 Sonar Pro - Análises detalhadas\n"
@@ -363,6 +372,227 @@ async def cmd_ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
+
+
+# ============= COMANDO /limpar =============
+
+async def cmd_limpar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Limpa histórico de conversação no servidor MCP"""
+    user_id = update.effective_user.id
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{MCP_API}/clear",
+                json={"user_id": str(user_id)}
+            )
+            data = response.json()
+        
+        msg = data.get('message', 'Histórico limpo!')
+        saved_id = data.get('saved_conversation_id')
+        
+        response_text = f"🗑️ *{msg}*\n\n"
+        if saved_id:
+            response_text += f"💾 *ID Salvo:* `{saved_id}`\n"
+            response_text += f"Use `/importar {saved_id}` no futuro.\n\n"
+            
+        response_text += "Iniciando uma nova conversa do zero."
+        
+        await update.message.reply_text(
+            response_text,
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            "🗑️ *Histórico limpo!*\n\n"
+            "Iniciando uma nova conversa do zero.",
+            parse_mode='Markdown'
+        )
+
+
+# ============= COMANDO /importar =============
+
+async def cmd_importar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Importa o contexto de uma conversa salva"""
+    user_id = update.effective_user.id
+    args = context.args
+    
+    if not args:
+        await update.message.reply_text(
+            "⚠️ Use: `/importar <ID>`\n"
+            "Exemplo: `/importar a1b2c3d4`\n\n"
+            "Use `/historico` para ver os IDs.",
+            parse_mode='Markdown'
+        )
+        return
+        
+    conv_id = args[0]
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    
+    try:
+        # Carrega histórico da API
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{MCP_API}/history/load",
+                json={"user_id": str(user_id), "conversation_id": conv_id}
+            )
+            
+        if response.status_code != 200:
+            await update.message.reply_text("❌ Histórico não encontrado.", parse_mode='Markdown')
+            return
+            
+        data = response.json()
+        conversation = data.get('conversation', {})
+        messages = conversation.get('messages', [])
+        title = conversation.get('title', 'Sem título')
+        
+        if not messages:
+            await update.message.reply_text("⚠️ Histórico vazio.", parse_mode='Markdown')
+            return
+            
+        # Formata contexto
+        context_text = f"Contexto importado da conversa '{title}' (ID: {conv_id}):\n\n"
+        for msg in messages:
+            role = "USUÁRIO" if msg.get('role') == 'user' else "ASSISTENTE"
+            content = msg.get('content', '')
+            context_text += f"[{role}]: {content}\n\n"
+            
+        # Envia como prompt para a IA
+        user_query = (
+            f"Estou fornecendo um contexto de uma conversa anterior para nossa referência.\n"
+            f"Por favor, leia e confirme que entendeu o contexto. Não precisa resumir, apenas confirme.\n\n"
+            f"--- INÍCIO DO CONTEXTO ---\n"
+            f"{context_text[:10000]}..." # Limite de segurança
+            f"\n--- FIM DO CONTEXTO ---"
+        )
+        
+        # Envia para o MCP /search
+        config = get_user_config(user_id)
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            payload = {
+                "query": user_query,
+                "user_id": str(user_id),
+                "model": config['model'],
+                "focus": "writing", # Focus writing é bom para processar texto
+                "return_citations": False
+            }
+            
+            response = await client.post(f"{MCP_API}/search", json=payload)
+            response.raise_for_status()
+            search_data = response.json()
+            
+        answer = search_data.get('answer', 'Contexto processado.')
+        
+        await update.message.reply_text(
+            f"✅ *Contexto Importado!*\n"
+            f"Dívida `{title}` foi adicionada ao contexto atual.\n\n"
+            f"🤖 *Resposta da IA:*\n_{answer}_",
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        logger.error(f"Erro ao importar: {e}")
+        await update.message.reply_text("❌ Erro ao importar contexto.", parse_mode='Markdown')
+
+
+# ============= COMANDO /new =============
+
+async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Cria uma nova conversa (limpa a anterior)"""
+    user_id = update.effective_user.id
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{MCP_API}/clear",
+                json={"user_id": str(user_id)}
+            )
+            data = response.json()
+        
+        msg_count = 0
+        saved_id = data.get('saved_conversation_id')
+        
+        if 'mensagens' in data.get('message', ''):
+            import re
+            match = re.search(r'\((\d+)', data.get('message', ''))
+            if match:
+                msg_count = int(match.group(1))
+        
+        msg_text = f"✨ *Nova conversa iniciada!*\n\n"
+        if saved_id:
+             msg_text += f"💾 *Histórico salvo:* `{saved_id}`\n"
+             msg_text += f"Use `/importar {saved_id}` para recuperar este contexto.\n\n"
+             
+        msg_text += f"Conversa anterior encerrada{f' ({msg_count} mensagens)' if msg_count else ''}.\n"
+        msg_text += "Me pergunte qualquer coisa! 🚀"
+        
+        await update.message.reply_text(msg_text, parse_mode='Markdown')
+    except Exception:
+        await update.message.reply_text(
+            "✨ *Nova conversa iniciada!*\n\n"
+            "Me pergunte qualquer coisa! 🚀",
+            parse_mode='Markdown'
+        )
+
+
+# ============= COMANDO /historico =============
+
+async def cmd_historico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Lista conversas salvas"""
+    user_id = update.effective_user.id
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{MCP_API}/history/list", params={"user_id": str(user_id)})
+            data = response.json()
+            
+        conversations = data.get('conversations', [])
+        
+        if not conversations:
+            await update.message.reply_text(
+                "📂 *Seu histórico está vazio.*\n\n"
+                "Use `/new` para criar novas conversas e elas serão salvas automaticamente ao limpar.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        keyboard = []
+        text = "📂 *Histórico de Conversas:*\n\n"
+        
+        for conv in conversations:
+            conv_id = conv.get('id')
+            title = conv.get('title', 'Sem título')
+            date_str = conv.get('created_at', '')[:10]  # YYYY-MM-DD
+            msg_count = conv.get('message_count', 0)
+            
+            # Formata data
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(conv.get('created_at'))
+                date_fmt = dt.strftime("%d/%m %H:%M")
+            except:
+                date_fmt = date_str
+            
+            # Adiciona ao texto
+            text += f"🔹 `{date_fmt}` - *{title}* ({msg_count} msgs)\n"
+            
+            # Adiciona botão
+            keyboard.append([InlineKeyboardButton(
+                f"📂 Abrir: {title[:20]}...",
+                callback_data=f'load_history_{conv_id}'
+            )])
+            
+        keyboard.append([InlineKeyboardButton("« Cancelar", callback_data='back_main')])
+        
+        await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        logger.error(f"Erro ao listar histórico: {e}")
+        await update.message.reply_text("❌ Erro ao buscar histórico.", parse_mode='Markdown')
 
 
 # ============= HANDLERS DE CALLBACK =============
@@ -403,6 +633,36 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.answer(f"✅ Modelo {model.upper()} selecionado!")
         await cmd_modelos(update, context)
     
+    elif data.startswith('load_history_'):
+        conv_id = data.replace('load_history_', '')
+        
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    f"{MCP_API}/history/load",
+                    json={"user_id": str(user_id), "conversation_id": conv_id}
+                )
+                data = response.json()
+            
+            if response.status_code == 200:
+                title = data.get('conversation', {}).get('title', 'Conversa')
+                msg_count = len(data.get('conversation', {}).get('messages', []))
+                
+                await query.answer("✅ Conversa carregada!")
+                await query.edit_message_text(
+                    f"📂 *Conversa Restaurada!* \n\n"
+                    f"📝 *{title}*\n"
+                    f"💬 *{msg_count} mensagens recuperadas*\n\n"
+                    f"Envie uma mensagem para continuar desta conversa.",
+                    parse_mode='Markdown'
+                )
+            else:
+                await query.answer("❌ Erro ao carregar.")
+                
+        except Exception as e:
+            logger.error(f"Erro ao carregar conversa: {e}")
+            await query.answer("❌ Erro de conexão.")
+
     # Seleção de focus
     elif data.startswith('set_focus_'):
         focus = data.replace('set_focus_', '')
@@ -457,6 +717,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         async with httpx.AsyncClient(timeout=60.0) as client:
             payload = {
                 "query": user_query,
+                "user_id": str(user_id),  # HISTÓRICO NATIVO!
                 "model": config['model'],
                 "focus": config['focus'],
                 "enable_reasoning": config['reasoning'],
@@ -470,6 +731,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         answer = data.get('answer', 'Sem resposta')
         thinking = data.get('thinking')
+        conv_info = data.get('conversation_info', {})
         
         # Se tem thinking (raciocínio), mostra primeiro
         if thinking and data.get('has_thinking'):
@@ -488,9 +750,11 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 url = cite.get('url', '')
                 answer += f"{i}. [{title}]({url})\n"
         
-        # Badge de metadados
+        # Badge de metadados com contador de mensagens nativo
+        msg_count = conv_info.get('message_count', 0)
         thinking_badge = "🧠 " if data.get('has_thinking') else ""
-        answer += f"\n_{thinking_badge}🤖 {data.get('model_used', config['model'])} | 🔍 {data.get('focus_mode', config['focus'])}_"
+        is_new = "🌟 " if conv_info.get('is_new') else ""
+        answer += f"\n_{is_new}{thinking_badge}🤖 {data.get('model_used', config['model'])} | 🔍 {data.get('focus_mode', config['focus'])} | 💬 {msg_count} msg_"
         
         await update.message.reply_text(
             answer,
@@ -644,8 +908,12 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("modelos", cmd_modelos))
     app.add_handler(CommandHandler("busca", cmd_busca))
+    app.add_handler(CommandHandler("new", cmd_new))
+    app.add_handler(CommandHandler("historico", cmd_historico))
+    app.add_handler(CommandHandler("importar", cmd_importar))
     app.add_handler(CommandHandler("normal", cmd_normal))
     app.add_handler(CommandHandler("config", cmd_config))
+    app.add_handler(CommandHandler("limpar", cmd_limpar))
     app.add_handler(CommandHandler("ajuda", cmd_ajuda))
     
     # Callbacks (botões inline)

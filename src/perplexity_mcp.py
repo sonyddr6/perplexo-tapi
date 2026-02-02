@@ -21,6 +21,10 @@ import base64
 import tempfile
 import logging
 import traceback
+import json
+import uuid
+from datetime import datetime
+from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 from flask import Flask, request, jsonify
@@ -104,6 +108,115 @@ if SCRAPER_AVAILABLE and Perplexity and PERPLEXITY_SESSION_TOKEN and PERPLEXITY_
         logger.error(f"❌ Erro ao inicializar cliente: {e}")
         client = None
 
+# ============= STORAGE DE CONVERSAS ATIVAS =============
+# Mantém uma conversa ativa por usuário para histórico nativo
+active_conversations: Dict[str, Any] = {}
+conversation_message_counts: Dict[str, int] = {}
+conversation_messages: Dict[str, List[Dict[str, str]]] = {}  # Armazena mensagens para salvar
+
+# Diretório para salvar conversas
+CONVERSATIONS_DIR = Path(os.getenv("CONVERSATIONS_DIR", "./data/conversations"))
+CONVERSATIONS_DIR.mkdir(parents=True, exist_ok=True)
+logger.info(f"📁 Diretório de conversas: {CONVERSATIONS_DIR.absolute()}")
+
+
+def save_conversation(user_id: str) -> Optional[str]:
+    """
+    Salva a conversa atual do usuário em um arquivo JSON.
+    Retorna o ID da conversa salva ou None se não houver conversa.
+    """
+    if user_id not in conversation_messages or not conversation_messages[user_id]:
+        return None
+    
+    conv_id = str(uuid.uuid4())[:8]
+    timestamp = datetime.now().isoformat()
+    
+    # Gera título a partir da primeira mensagem do usuário
+    first_msg = ""
+    for msg in conversation_messages[user_id]:
+        if msg.get('role') == 'user':
+            first_msg = msg.get('content', '')[:50]
+            break
+    
+    title = first_msg + "..." if len(first_msg) >= 50 else first_msg
+    if not title:
+        title = f"Conversa {conv_id}"
+    
+    # Cria objeto da conversa
+    conversation_data = {
+        "id": conv_id,
+        "user_id": user_id,
+        "title": title,
+        "created_at": timestamp,
+        "message_count": len(conversation_messages[user_id]),
+        "messages": conversation_messages[user_id]
+    }
+    
+    # Cria pasta do usuário
+    user_dir = CONVERSATIONS_DIR / user_id
+    user_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Salva arquivo
+    file_path = user_dir / f"{conv_id}.json"
+    with open(file_path, 'w', encoding='utf-8') as f:
+        json.dump(conversation_data, f, ensure_ascii=False, indent=2)
+    
+    logger.info(f"[💾 SAVE] Conversa {conv_id} salva para user_id={user_id} ({len(conversation_messages[user_id])} msgs)")
+    return conv_id
+
+
+def list_saved_conversations(user_id: str) -> List[Dict[str, Any]]:
+    """
+    Lista todas as conversas salvas de um usuário.
+    """
+    user_dir = CONVERSATIONS_DIR / user_id
+    if not user_dir.exists():
+        return []
+    
+    conversations = []
+    for file_path in sorted(user_dir.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                conversations.append({
+                    "id": data.get("id"),
+                    "title": data.get("title"),
+                    "created_at": data.get("created_at"),
+                    "message_count": data.get("message_count", 0)
+                })
+        except Exception as e:
+            logger.warning(f"Erro ao ler {file_path}: {e}")
+    
+    return conversations[:20]  # Limita a 20 conversas
+
+
+def load_conversation(user_id: str, conv_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Carrega uma conversa salva pelo ID.
+    """
+    file_path = CONVERSATIONS_DIR / user_id / f"{conv_id}.json"
+    if not file_path.exists():
+        return None
+    
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Erro ao carregar conversa {conv_id}: {e}")
+        return None
+
+
+def delete_saved_conversation(user_id: str, conv_id: str) -> bool:
+    """
+    Deleta uma conversa salva.
+    """
+    file_path = CONVERSATIONS_DIR / user_id / f"{conv_id}.json"
+    if file_path.exists():
+        file_path.unlink()
+        logger.info(f"[🗑️ DELETE] Conversa {conv_id} deletada")
+        return True
+    return False
+
 
 def get_model_enum(model_id: str):
     """Converte ID do modelo para enum do scraper"""
@@ -180,7 +293,8 @@ def health_check():
         "scraper_available": SCRAPER_AVAILABLE,
         "client_initialized": client is not None,
         "source_focus_available": SourceFocus is not None,
-        "version": "2.1.0"
+        "active_conversations": len(active_conversations),
+        "version": "2.2.0"
     })
 
 
@@ -218,15 +332,19 @@ def list_models():
 @limiter.limit("20 per minute")
 def search():
     """
-    Endpoint principal de busca.
+    Endpoint principal de busca COM HISTÓRICO NATIVO.
     
     Payload:
     {
         "query": "string",
+        "user_id": "string (identificador do usuário)",
         "model": "best|sonar|deep-research|gpt-5.2|claude-4.5-sonnet|...",
         "focus": "web|academic|youtube|reddit|wolfram",
         "citation_mode": "default|markdown|clean"
     }
+    
+    O histórico é mantido automaticamente por user_id.
+    Use POST /clear para limpar o histórico de um usuário.
     """
     try:
         data = request.json
@@ -235,11 +353,10 @@ def search():
             return jsonify({"error": "Campo 'query' é obrigatório"}), 400
         
         query = data['query']
+        user_id = str(data.get('user_id', 'default'))  # Identificador do usuário
         model_id = data.get('model', 'best')
         focus_id = data.get('focus', 'web')
         citation_mode = data.get('citation_mode', 'markdown')
-        
-        logger.info(f"[SEARCH] Query: {query[:50]}... | Model: {model_id} | Focus: {focus_id}")
         
         # Verifica se o scraper está disponível
         if not SCRAPER_AVAILABLE:
@@ -259,27 +376,69 @@ def search():
         model_enum = get_model_enum(model_id)
         citation_enum = get_citation_mode(citation_mode)
         
-        # Cria configuração da conversa (sem source_focus se não disponível)
-        config_kwargs = {
-            "model": model_enum,
-            "citation_mode": citation_enum,
-            "language": "pt-BR"
-        }
+        # Verifica se já existe conversa ativa para este usuário
+        conversation = active_conversations.get(user_id)
+        is_new_conversation = False
         
-        # Adiciona source_focus apenas se disponível
-        if SourceFocus is not None:
-            source_focus_enum = get_source_focus(focus_id)
-            if source_focus_enum:
-                config_kwargs["source_focus"] = [source_focus_enum]
+        if conversation is None:
+            # Cria nova conversa para o usuário
+            config_kwargs = {
+                "model": model_enum,
+                "citation_mode": citation_enum,
+                "language": "pt-BR",
+                "save_to_library": True  # Salva na conta do usuário!
+            }
+            
+            # Adiciona source_focus apenas se disponível
+            if SourceFocus is not None:
+                source_focus_enum = get_source_focus(focus_id)
+                if source_focus_enum:
+                    config_kwargs["source_focus"] = [source_focus_enum]
+            
+            config = ConversationConfig(**config_kwargs)
+            conversation = client.create_conversation(config)
+            active_conversations[user_id] = conversation
+            
+            # Se já tem mensagens em memória (ex: restauradas do histórico), injeta na nova conversa
+            if user_id in conversation_messages and conversation_messages[user_id]:
+                logger.info(f"[SEARCH] Restaurando {len(conversation_messages[user_id])} mensagens para user_id={user_id}")
+                try:
+                    # Tenta reinjetar histórico
+                    msgs = conversation_messages[user_id]
+                    for i in range(0, len(msgs) - 1, 2):
+                        user_msg = msgs[i]
+                        asst_msg = msgs[i+1] if i+1 < len(msgs) else None
+                        
+                        if user_msg.get('role') == 'user' and asst_msg and asst_msg.get('role') == 'assistant':
+                             if hasattr(conversation, 'add_message'):
+                                conversation.add_message(user_msg['content'], role='user')
+                                conversation.add_message(asst_msg['content'], role='assistant')
+                except Exception as e:
+                    logger.warning(f"Erro ao restaurar histórico nativo: {e}")
+            else:
+                conversation_messages[user_id] = []  # Inicia limpo se não tinha nada
+                
+            conversation_message_counts[user_id] = len(conversation_messages.get(user_id, []))
+            is_new_conversation = True
+            logger.info(f"[SEARCH] Nova conversa iniciada para user_id={user_id}")
         
-        config = ConversationConfig(**config_kwargs)
+        # Incrementa contador de mensagens
+        conversation_message_counts[user_id] = conversation_message_counts.get(user_id, 0) + 1
+        msg_count = conversation_message_counts[user_id]
         
-        # Cria conversa e faz a pergunta
-        conversation = client.create_conversation(config)
+        logger.info(f"[SEARCH] Query: {query[:50]}... | User: {user_id} | Msg #{msg_count} | Model: {model_id}")
+        
+        # Faz a pergunta NA MESMA CONVERSA (histórico nativo!)
         conversation.ask(query)
         
         # Extrai resposta
         answer = conversation.answer if hasattr(conversation, 'answer') else str(conversation)
+        
+        # Salva mensagens para persistência
+        if user_id not in conversation_messages:
+            conversation_messages[user_id] = []
+        conversation_messages[user_id].append({"role": "user", "content": query})
+        conversation_messages[user_id].append({"role": "assistant", "content": answer})
         
         # Extrai thinking (raciocínio) se disponível - para modelos THINKING
         thinking = None
@@ -323,11 +482,16 @@ def search():
         
         response = {
             "answer": answer,
-            "thinking": thinking,  # Novo campo para raciocínio
+            "thinking": thinking,
             "model_used": model_id,
             "focus_mode": focus_id,
             "citations": citations,
-            "has_thinking": thinking is not None
+            "has_thinking": thinking is not None,
+            "conversation_info": {
+                "user_id": user_id,
+                "message_count": msg_count,
+                "is_new": is_new_conversation
+            }
         }
         
         return jsonify(response)
@@ -336,6 +500,146 @@ def search():
         logger.error(f"Erro em /search: {e}")
         logger.error(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/clear', methods=['POST'])
+def clear_conversation():
+    """
+    Limpa o histórico de conversa de um usuário.
+    
+    Payload:
+    {
+        "user_id": "string"
+    }
+    """
+    try:
+        data = request.json or {}
+        user_id = str(data.get('user_id', 'default'))
+        
+        saved_id = None
+        msg_count = 0
+        
+        # SALVA a conversa antes de limpar!
+        if user_id in conversation_messages and conversation_messages[user_id]:
+            saved_id = save_conversation(user_id)
+            msg_count = len(conversation_messages[user_id]) // 2  # Pares de msgs
+        
+        # Limpa da memória
+        if user_id in active_conversations:
+            del active_conversations[user_id]
+        if user_id in conversation_message_counts:
+            del conversation_message_counts[user_id]
+        if user_id in conversation_messages:
+            del conversation_messages[user_id]
+        
+        if saved_id:
+            logger.info(f"[CLEAR] Conversa salva como {saved_id} e limpa para user_id={user_id}")
+            return jsonify({
+                "success": True,
+                "message": f"Conversa salva ({msg_count} mensagens) e limpa",
+                "user_id": user_id,
+                "saved_conversation_id": saved_id
+            })
+        else:
+            return jsonify({
+                "success": True,
+                "message": "Nenhum histórico encontrado",
+                "user_id": user_id
+            })
+            
+    except Exception as e:
+        logger.error(f"Erro em /clear: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/conversation-status', methods=['GET'])
+def conversation_status():
+    """
+    Retorna status das conversas ativas.
+    Query param: ?user_id=xxx para ver de um usuário específico
+    """
+    user_id = request.args.get('user_id')
+    
+    if user_id:
+        return jsonify({
+            "user_id": user_id,
+            "has_active_conversation": user_id in active_conversations,
+            "message_count": conversation_message_counts.get(user_id, 0)
+        })
+    
+    return jsonify({
+        "total_active_conversations": len(active_conversations),
+        "conversations": {
+            uid: {"message_count": conversation_message_counts.get(uid, 0)}
+            for uid in active_conversations.keys()
+        }
+    })
+
+
+@app.route('/history/list', methods=['GET'])
+def history_list():
+    """
+    Lista conversas salvas de um usuário.
+    Query param: ?user_id=xxx
+    """
+    user_id = request.args.get('user_id')
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+    
+    conversations = list_saved_conversations(user_id)
+    return jsonify({"conversations": conversations})
+
+
+@app.route('/history/load', methods=['POST'])
+def history_load():
+    """
+    Carrega uma conversa salva.
+    Payload: { "user_id": "xxx", "conversation_id": "xxx" }
+    """
+    data = request.json or {}
+    user_id = data.get('user_id')
+    conv_id = data.get('conversation_id')
+    
+    if not user_id or not conv_id:
+        return jsonify({"error": "user_id and conversation_id required"}), 400
+        
+    conversation_data = load_conversation(user_id, conv_id)
+    if not conversation_data:
+        return jsonify({"error": "Conversation not found"}), 404
+    
+    # Restaura estado em memória
+    messages = conversation_data.get('messages', [])
+    conversation_messages[user_id] = messages
+    conversation_message_counts[user_id] = len(messages)
+    
+    # Remove conversa ativa anterior para forçar criação de nova com nosso histórico
+    if user_id in active_conversations:
+        del active_conversations[user_id]
+    
+    logger.info(f"[LOAD] Conversa {conv_id} carregada para user_id={user_id} ({len(messages)} msgs)")
+    
+    return jsonify({
+        "success": True, 
+        "conversation": conversation_data,
+        "message": "Conversa carregada! Próxima mensagem continuará este contexto."
+    })
+
+
+@app.route('/history/delete', methods=['POST'])
+def history_delete():
+    """
+    Deleta uma conversa salva.
+    Payload: { "user_id": "xxx", "conversation_id": "xxx" }
+    """
+    data = request.json or {}
+    user_id = data.get('user_id')
+    conv_id = data.get('conversation_id')
+    
+    if not user_id or not conv_id:
+        return jsonify({"error": "user_id and conversation_id required"}), 400
+        
+    success = delete_saved_conversation(user_id, conv_id)
+    return jsonify({"success": success})
 
 
 @app.route('/vision', methods=['POST'])
