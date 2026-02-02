@@ -471,7 +471,7 @@ async def cmd_importar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         
         # Envia para o MCP /search
         config = get_user_config(user_id)
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             payload = {
                 "query": user_query,
                 "user_id": str(user_id),
@@ -809,6 +809,105 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # ============= HANDLER DE MENSAGENS DE TEXTO =============
 
+async def reply_chunked(update: Update, text: str):
+    """Envia mensagem longa dividida em partes para evitar erro 400 do Telegram"""
+    MAX_LENGTH = 4000
+    
+    if len(text) <= MAX_LENGTH:
+        try:
+            await update.message.reply_text(text, parse_mode='Markdown', disable_web_page_preview=True)
+        except Exception:
+             # Fallback: Se der erro de markdown (comum com caracteres especiais), tenta raw
+             await update.message.reply_text(text, disable_web_page_preview=True)
+        return
+
+    # Divide em partes
+    parts = [text[i:i+MAX_LENGTH] for i in range(0, len(text), MAX_LENGTH)]
+    
+    for i, part in enumerate(parts):
+        try:
+            # Tenta mandar com markdown
+            await update.message.reply_text(part, parse_mode='Markdown', disable_web_page_preview=True)
+        except Exception:
+            # Se falhar (ex: corte no meio de um bloco de código), manda raw
+            await update.message.reply_text(part)
+
+
+async def extract_and_send_files(update: Update, text: str) -> str:
+    """
+    Extrai blocos de código (>50 chars), envia como arquivos e remove do texto original.
+    Retorna o texto limpo.
+    """
+    import re
+    import tempfile
+    
+    # Regex para capturar blocos ```lang ... ```
+    pattern = r"```(\w+)?\n(.*?)```"
+    matches = list(re.finditer(pattern, text, re.DOTALL))
+    
+    file_count = 0
+    clean_text = text
+    
+    # Mapeamento de extensões
+    EXT_MAP = {
+        'html': '.html', 'htm': '.html',
+        'css': '.css',
+        'js': '.js', 'javascript': '.js', 'typescript': '.ts', 'ts': '.ts',
+        'py': '.py', 'python': '.py',
+        'java': '.java',
+        'c': '.c', 'cpp': '.cpp',
+        'cs': '.cs', 'csharp': '.cs',
+        'php': '.php',
+        'sql': '.sql',
+        'json': '.json',
+        'xml': '.xml',
+        'yaml': '.yaml', 'yml': '.yaml',
+        'md': '.md',
+        'sh': '.sh', 'bash': '.sh', 'shell': '.sh',
+        'txt': '.txt',
+        'dockerfile': 'Dockerfile'
+    }
+
+    for match in matches:
+        lang = (match.group(1) or 'txt').lower()
+        content = match.group(2)
+        full_block = match.group(0)
+        
+        # Ignora blocos muito pequenos (menos de 50 chars) para evitar spam
+        if len(content) < 50:
+            continue
+            
+        ext = EXT_MAP.get(lang, '.txt')
+        file_count += 1
+        
+        # Nome inteligente
+        filename = f"code_{file_count}{ext}"
+        if ext == 'Dockerfile': filename = 'Dockerfile'
+        
+        try:
+            # Cria arquivo temporário
+            with tempfile.NamedTemporaryFile(mode='w', suffix=ext, delete=False, encoding='utf-8') as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+                
+            # Envia arquivo
+            await update.message.reply_document(
+                document=open(tmp_path, 'rb'),
+                filename=filename,
+                caption=f"📝 Código extraído ({lang})"
+            )
+            
+            # Limpa temp
+            os.remove(tmp_path)
+            
+            # Remove do texto final (substitui por placeholder discreto)
+            clean_text = clean_text.replace(full_block, f"\n📂 *[Arquivo enviado: {filename}]*\n")
+            
+        except Exception as e:
+            logger.error(f"Erro code-to-file: {e}")
+            
+    return clean_text 
+
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Processa mensagens de texto"""
     user_id = update.effective_user.id
@@ -818,7 +917,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=180.0) as client:
             payload = {
                 "query": user_query,
                 "user_id": str(user_id),  # HISTÓRICO NATIVO!
@@ -839,12 +938,16 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         # Se tem thinking (raciocínio), mostra primeiro
         if thinking and data.get('has_thinking'):
-            thinking_text = f"🧠 *Raciocínio interno:*\n_{thinking[:1500]}{'...' if len(thinking) > 1500 else ''}_\n\n---\n\n"
-            await update.message.reply_text(
-                thinking_text,
-                parse_mode='Markdown',
-                disable_web_page_preview=True
-            )
+            thinking_text = f"🧠 *Raciocínio interno:*\n_{thinking}_\n\n---\n\n"
+            # Usa chunked também para thinking se for muito grande
+            if len(thinking_text) > 4000:
+                 await reply_chunked(update, thinking_text)
+            else:
+                await update.message.reply_text(
+                    thinking_text,
+                    parse_mode='Markdown',
+                    disable_web_page_preview=True
+                )
         
         # Adiciona citações se ativado
         if config['return_citations'] and data.get('citations'):
@@ -860,11 +963,11 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         is_new = "🌟 " if conv_info.get('is_new') else ""
         answer += f"\n_{is_new}{thinking_badge}🤖 {data.get('model_used', config['model'])} | 🔍 {data.get('focus_mode', config['focus'])} | 💬 {msg_count} msg_"
         
-        await update.message.reply_text(
-            answer,
-            parse_mode='Markdown',
-            disable_web_page_preview=True
-        )
+        # Tenta extrair e enviar arquivos de código PRIMEIRO e pega texto limpo
+        clean_answer = await extract_and_send_files(update, answer)
+
+        # Envia resposta limpa (sem o código duplicado)
+        await reply_chunked(update, clean_answer)
         
         # Envia imagens se retornadas
         if config['return_images'] and data.get('images'):
@@ -915,7 +1018,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         photo_b64 = base64.b64encode(photo_bytes).decode()
         
         # Chama MCP API com imagem
-        async with httpx.AsyncClient(timeout=90.0) as client:
+        async with httpx.AsyncClient(timeout=180.0) as client:
             payload = {
                 "query": caption,
                 "model": config['model'],
