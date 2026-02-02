@@ -124,6 +124,7 @@ async def post_init(application: Application) -> None:
         BotCommand("busca", "🔍 Modo de Busca (Focus)"),
         BotCommand("new", "✨ Nova Conversa"),
         BotCommand("historico", "📂 Histórico salvo"),
+        BotCommand("teste", "🕵️ Diagnóstico"),
         BotCommand("importar", "📥 Importar Contexto"),
         BotCommand("normal", "💬 Conversa Normal"),
         BotCommand("config", "⚙️ Configurações"),
@@ -595,6 +596,46 @@ async def cmd_historico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("❌ Erro ao buscar histórico.", parse_mode='Markdown')
 
 
+# ============= COMANDO /teste =============
+
+async def cmd_teste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Executa diagnóstico do sistema"""
+    try:
+        msg = await update.message.reply_text("🕵️ *Executando diagnóstico...*", parse_mode='Markdown')
+        
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            try:
+                # Chama endpoint de diagnóstico
+                response = await client.get(f"{MCP_API}/diagnostics")
+                data = response.json()
+                
+                status_mcp = "✅ Online" if data.get('mcp_status') == 'online' else "❌ Offline"
+                ip = data.get('public_ip', 'Desconhecido')
+                auth_status = data.get('perplexity_auth', 'unknown')
+                
+                auth_emoji = "✅ Válido" if auth_status == 'configured' else "❌ Inválido/Ausente"
+                if auth_status == 'missing_token': auth_emoji = "⚠️ Sem Token"
+                
+                report = (
+                    "🕵️ *Relatório de Diagnóstico*\n\n"
+                    f"🤖 *MCP Server:* {status_mcp}\n"
+                    f"🌐 *IP de Saída:* `{ip}`\n"
+                    f"🔑 *Perplexity:* {auth_emoji}\n\n"
+                )
+                
+                if data.get('auth_error'):
+                    report += f"⚠️ *Erro Auth:* `{data['auth_error']}`\n"
+                    
+                await msg.edit_text(report, parse_mode='Markdown')
+                
+            except httpx.ConnectError:
+                await msg.edit_text("❌ *MCP Offline*: Não consegui conectar ao servidor.", parse_mode='Markdown')
+                
+    except Exception as e:
+        logger.error(f"Erro no teste: {e}")
+        await update.message.reply_text("❌ Erro ao executar teste.", parse_mode='Markdown')
+
+
 # ============= HANDLERS DE CALLBACK =============
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -909,7 +950,9 @@ def main() -> None:
     app.add_handler(CommandHandler("modelos", cmd_modelos))
     app.add_handler(CommandHandler("busca", cmd_busca))
     app.add_handler(CommandHandler("new", cmd_new))
+    app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("historico", cmd_historico))
+    app.add_handler(CommandHandler("teste", cmd_teste))
     app.add_handler(CommandHandler("importar", cmd_importar))
     app.add_handler(CommandHandler("normal", cmd_normal))
     app.add_handler(CommandHandler("config", cmd_config))

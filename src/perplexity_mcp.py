@@ -386,7 +386,7 @@ def search():
                 "model": model_enum,
                 "citation_mode": citation_enum,
                 "language": "pt-BR",
-                "save_to_library": True  # Salva na conta do usuário!
+                #"save_to_library": True  # DESABILITADO: Causa erro 403 na VPN
             }
             
             # Adiciona source_focus apenas se disponível
@@ -704,6 +704,53 @@ def vision():
         logger.error(f"Erro em /vision: {e}")
         logger.error(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/diagnostics', methods=['GET'])
+def diagnostics():
+    """
+    Diagnóstico completo do sistema.
+    Checa:
+    1. IP Público (para validar VPN)
+    2. Autenticação Perplexity (tenta conectar)
+    """
+    result = {
+        "mcp_status": "online",
+        "public_ip": "unknown",
+        "perplexity_auth": "unknown",
+        "auth_error": None
+    }
+    
+    # 1. Checa IP Público
+    try:
+        import requests
+        try:
+            ip_resp = requests.get('https://api.ipify.org', timeout=5)
+            if ip_resp.status_code == 200:
+                result['public_ip'] = ip_resp.text
+        except:
+             # Fallback
+             ip_resp = requests.get('https://ifconfig.me/ip', timeout=5)
+             result['public_ip'] = ip_resp.text.strip()
+             
+    except Exception as e:
+        result['public_ip'] = f"Error: {str(e)}"
+        
+    # 2. Checa Autenticação Perplexity
+    try:
+        if SCRAPER_AVAILABLE and client is not None:
+             # Verifica se tem token configurado
+             if client.session and len(str(client.session)) > 20:
+                 result['perplexity_auth'] = "configured"
+             else:
+                 result['perplexity_auth'] = "missing_token"
+        else:
+            result['perplexity_auth'] = "scraper_unavailable"
+
+    except Exception as e:
+        result['error'] = str(e)
+        
+    return jsonify(result)
 
 
 # ============= ERROR HANDLERS =============
