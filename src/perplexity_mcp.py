@@ -347,9 +347,11 @@ def search():
     O histórico é mantido automaticamente por user_id.
     Use POST /clear para limpar o histórico de um usuário.
     """
+    try:
         # Suporte Híbrido: JSON ou Multipart/Form
         files_to_upload = []
         
+        data = None
         if request.is_json:
             data = request.json
         else:
