@@ -662,22 +662,7 @@ def config_library():
     })
 
 
-@app.route('/config/library', methods=['GET', 'POST'])
-def config_library():
-    """
-    GET: Retorna estado atual do save_to_library
-    POST: Inverte estado (toggle) e retorna novo
-    """
-    global SAVE_TO_LIBRARY_ENABLED
-    
-    if request.method == 'POST':
-        SAVE_TO_LIBRARY_ENABLED = not SAVE_TO_LIBRARY_ENABLED
-        logger.info(f"[CONFIG] Save to Library alterado para: {SAVE_TO_LIBRARY_ENABLED}")
-        
-    return jsonify({
-        "enabled": SAVE_TO_LIBRARY_ENABLED,
-        "message": "Save to Library ATIVADO" if SAVE_TO_LIBRARY_ENABLED else "Save to Library DESATIVADO"
-    })
+
 
 
 @app.route('/vision', methods=['POST'])
