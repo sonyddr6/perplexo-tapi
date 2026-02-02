@@ -1049,55 +1049,64 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     config = get_user_config(user_id)
     
     document = update.message.document
-    file_name = document.file_name
+    file_name = document.file_name or f"arquivo_{document.file_id}"
+    mime_type = document.mime_type or "application/octet-stream"
     
-    # Só aceita .txt por enquanto
-    if not file_name.endswith('.txt'):
-        await update.message.reply_text(
-            "⚠️ Por enquanto só aceito arquivos `.txt`\n"
-            "Envie um arquivo de texto para resumir.",
-            parse_mode='Markdown'
-        )
+    # Lista negra de extensões perigosas (opcional, mas bom pra segurança)
+    BLOCKED_EXTENSIONS = ('.exe', '.bat', '.cmd', '.sh', '.bin')
+    if file_name.lower().endswith(BLOCKED_EXTENSIONS):
+        await update.message.reply_text("⚠️ Tipo de arquivo não permitido por segurança.")
         return
-    
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_document")
     
     try:
-        # Download do arquivo
-        file = await document.get_file()
-        file_bytes = await file.download_as_bytearray()
+        # Download do arquivo (em memória)
+        telegram_file = await document.get_file()
+        file_bytes = await telegram_file.download_as_bytearray()
         
-        try:
-            text_content = file_bytes.decode('utf-8')
-        except UnicodeDecodeError:
-            text_content = file_bytes.decode('latin-1')
+        # Prepara a query
+        user_query = update.message.caption or f"Analise o arquivo {file_name}"
         
-        # Limita tamanho (10KB máx)
-        if len(text_content) > 10000:
-            text_content = text_content[:10000] + "\n[...truncado]"
-        
-        # Chama MCP API
-        query = f"Resuma o seguinte texto:\n\n{text_content}"
-        
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            payload = {
-                "query": query,
+        # Envia para MCP via Multipart Upload
+        async with httpx.AsyncClient(timeout=300.0) as client:  # 5 min para uploads grandes
+            # Metadados como campos de formulário
+            data_payload = {
+                "query": user_query,
+                "user_id": str(user_id),
                 "model": config['model'],
-                "focus": "writing",
-                "return_citations": False
+                "focus": "web",
+                "return_citations": "false" # string para form-data
             }
             
-            response = await client.post(f"{MCP_API}/search", json=payload)
-            response.raise_for_status()
+            # Arquivo
+            files_payload = {
+                'file': (file_name, file_bytes, mime_type)
+            }
+            
+            # POST /search (agora aceita multipart)
+            response = await client.post(
+                f"{MCP_API}/search",
+                data=data_payload,
+                files=files_payload
+            )
+            
+            # Verifica erro
+            if response.status_code != 200:
+                logger.error(f"Erro MCP: {response.text}")
+                raise Exception(f"MCP retornou erro {response.status_code}")
+                
             data = response.json()
         
-        answer = f"📄 *Resumo de {file_name}:*\n\n{data.get('answer', 'Sem resposta')}"
-        await update.message.reply_text(answer, parse_mode='Markdown')
+        # Processa a resposta
+        answer = data.get('answer', 'Sem resposta')
+        clean_answer = await extract_and_send_files(update, answer)
+        await reply_chunked(update, clean_answer)
         
     except Exception as e:
         logger.error(f"Erro ao processar documento: {e}")
         await update.message.reply_text(
-            "❌ Erro ao processar arquivo. Verifique se é UTF-8.",
+            f"❌ Erro ao enviar arquivo: {e}",
             parse_mode='Markdown'
         )
 
@@ -1133,7 +1142,7 @@ def main() -> None:
     # Mensagens
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.Document.TEXT, handle_document))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
     # Webhook ou Polling
     if WEBHOOK_URL:

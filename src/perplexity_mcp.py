@@ -347,14 +347,35 @@ def search():
     O histórico é mantido automaticamente por user_id.
     Use POST /clear para limpar o histórico de um usuário.
     """
-    try:
-        data = request.json
+        # Suporte Híbrido: JSON ou Multipart/Form
+        files_to_upload = []
         
+        if request.is_json:
+            data = request.json
+        else:
+            data = request.form
+            # Processa upload de arquivos
+            if request.files:
+                try:
+                    upload_dir = Path(tempfile.gettempdir()) / "pplx_uploads"
+                    upload_dir.mkdir(exist_ok=True)
+                    
+                    for key in request.files:
+                        file = request.files[key]
+                        if file.filename:
+                            safe_name = f"{uuid.uuid4().hex[:8]}_{file.filename}"
+                            tmp_path = upload_dir / safe_name
+                            file.save(tmp_path)
+                            files_to_upload.append(str(tmp_path))
+                            logger.info(f"[UPLOAD] Arquivo salvo: {tmp_path}")
+                except Exception as e:
+                    logger.error(f"Erro ao salvar upload: {e}")
+
         if not data or 'query' not in data:
             return jsonify({"error": "Campo 'query' é obrigatório"}), 400
         
         query = data['query']
-        user_id = str(data.get('user_id', 'default'))  # Identificador do usuário
+        user_id = str(data.get('user_id', 'default'))
         model_id = data.get('model', 'best')
         focus_id = data.get('focus', 'web')
         citation_mode = data.get('citation_mode', 'markdown')
@@ -431,7 +452,11 @@ def search():
         logger.info(f"[SEARCH] Query: {query[:50]}... | User: {user_id} | Msg #{msg_count} | Model: {model_id}")
         
         # Faz a pergunta NA MESMA CONVERSA (histórico nativo!)
-        conversation.ask(query)
+        if files_to_upload:
+            logger.info(f"[SEARCH] Enviando {len(files_to_upload)} arquivos para Perplexity...")
+            conversation.ask(query, files=files_to_upload)
+        else:
+            conversation.ask(query)
         
         # Extrai resposta
         answer = conversation.answer if hasattr(conversation, 'answer') else str(conversation)
@@ -495,6 +520,13 @@ def search():
                 "is_new": is_new_conversation
             }
         }
+        
+        # Limpeza de arquivos temporários
+        for fpath in files_to_upload:
+            try:
+                os.remove(fpath)
+            except Exception as e:
+                logger.warning(f"Erro ao remover temp {fpath}: {e}")
         
         return jsonify(response)
         
