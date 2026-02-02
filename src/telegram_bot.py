@@ -24,6 +24,8 @@ import os
 import sys
 import base64
 import logging
+import asyncio
+import json
 from typing import Dict, Any, Optional
 
 from telegram import (
@@ -79,6 +81,10 @@ def get_user_config(user_id: int) -> Dict[str, Any]:
         'mode': 'busca',
         'reasoning': False,
         'return_images': True,
+        'mode': 'busca',
+        'time_range': 'all',
+        'reasoning': False,
+        'return_images': True,
         'return_citations': True
     })
 
@@ -113,6 +119,14 @@ FOCUS_MODES = [
     ('wolfram', '🧮 Wolfram', 'Matemática/Cálculos')
 ]
 
+TIME_RANGES = [
+    ('all', '♾️ Qualquer data', 'Sem filtro de tempo'),
+    ('day', '📅 Últimas 24h', 'Pesquisa apenas hoje'),
+    ('week', '🗓️ Esta Semana', 'Últimos 7 dias'),
+    ('month', '📆 Este Mês', 'Últimos 30 dias'),
+    ('year', '📅 Este Ano', 'Últimos 365 dias')
+]
+
 
 # ============= SETUP DOS COMANDOS =============
 
@@ -122,6 +136,8 @@ async def post_init(application: Application) -> None:
         BotCommand("start", "🏠 Menu Principal"),
         BotCommand("modelos", "🤖 Escolher Modelo AI"),
         BotCommand("busca", "🔍 Modo de Busca (Focus)"),
+        BotCommand("denovo", "🔄 Tentar Novamente (Retry)"),
+        BotCommand("tempo", "📅 Filtro de Tempo"),
         BotCommand("new", "✨ Nova Conversa"),
         BotCommand("library", "📚 Save Cloud (Toggle)"),
         BotCommand("token", "🔑 Atualizar Token"),
@@ -234,11 +250,49 @@ async def cmd_busca(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             callback_data=f'set_focus_{focus_id}'
         )])
     
+
+    keyboard.append([InlineKeyboardButton("📅 Recency (Tempo)", callback_data='menu_tempo')])
     keyboard.append([InlineKeyboardButton("« Voltar", callback_data='back_main')])
     
     text = "🔍 *Modo de Busca (Focus)*\n\n"
     for focus_id, emoji_name, description in FOCUS_MODES:
         marker = "✅" if focus_id == current_focus else "○"
+        text += f"{marker} *{emoji_name}* - {description}\n"
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+    elif update.message:
+        await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+
+
+async def cmd_tempo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Seletor de Time Range"""
+    user_id = update.effective_user.id
+    config = get_user_config(user_id)
+    current_range = config.get('time_range', 'all')
+    
+    keyboard = []
+    for range_id, emoji_name, description in TIME_RANGES:
+        prefix = "✅ " if range_id == current_range else ""
+        button_text = f"{prefix}{emoji_name}"
+        keyboard.append([InlineKeyboardButton(
+            button_text,
+            callback_data=f'set_time_{range_id}'
+        )])
+    
+    keyboard.append([InlineKeyboardButton("« Voltar", callback_data='menu_busca')])
+    
+    text = "📅 *Filtro de Tempo (Recency)*\n\n"
+    for range_id, emoji_name, description in TIME_RANGES:
+        marker = "✅" if range_id == current_range else "○"
         text += f"{marker} *{emoji_name}* - {description}\n"
     
     if update.callback_query:
@@ -598,7 +652,48 @@ async def cmd_historico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("❌ Erro ao buscar histórico.", parse_mode='Markdown')
 
 
+
+# ============= COMANDO /denovo (RETRY) =============
+
+async def cmd_denovo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tenta recuperar a última resposta do backend (Retry)"""
+    user_id = update.effective_user.id
+    
+    await update.message.reply_text("🔄 Verificando histórico no servidor...", parse_mode='Markdown')
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{MCP_API}/last_response", params={"user_id": user_id})
+            
+            if response.status_code == 200:
+                data = response.json()
+                answer = data.get('answer', '')
+                
+                if not answer:
+                    await update.message.reply_text("❌ A última resposta estava vazia.")
+                    return
+                    
+                await update.message.reply_text("✅ Resposta recuperada! Processando arquivos...")
+                
+                # Reutiliza a lógica robusta de extração
+                final_text = await extract_and_send_files(update, answer)
+                
+                # Envia o texto final formatado
+                await update.message.reply_text(final_text, parse_mode='Markdown', disable_web_page_preview=True)
+                
+            elif response.status_code == 404:
+                await update.message.reply_text("❌ Nenhuma conversa recente encontrada na memória do servidor.")
+            else:
+                await update.message.reply_text(f"❌ Erro ao buscar: {response.status_code}")
+                
+    except Exception as e:
+        logger.error(f"Erro cmd_denovo: {e}")
+        await update.message.reply_text(f"❌ Erro ao tentar recuperar: {e}")
+
+
 # ============= COMANDO /library =============
+
 
 async def cmd_library(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Alterna o modo Save to Library (Nuvem)"""
@@ -725,6 +820,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await cmd_config(update, context)
     elif data == 'menu_ajuda':
         await cmd_ajuda(update, context)
+    elif data == 'menu_tempo':
+        await cmd_tempo(update, context)
     
     # Seleção de modelo
     elif data.startswith('set_model_'):
@@ -777,8 +874,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         await query.answer(f"✅ Focus {focus.upper()} selecionado!")
         await cmd_busca(update, context)
-    
-    # Toggles de config
+
+    # Seleção de tempo
+    elif data.startswith('set_time_'):
+        time_range = data.replace('set_time_', '')
+        config = get_user_config(user_id)
+        config['time_range'] = time_range
+        save_user_config(user_id, config)
+        
+        await query.answer(f"✅ Tempo {time_range.upper()} selecionado!")
+        await cmd_tempo(update, context)
     elif data == 'toggle_reasoning':
         config = get_user_config(user_id)
         config['reasoning'] = not config['reasoning']
@@ -908,6 +1013,186 @@ async def extract_and_send_files(update: Update, text: str) -> str:
             
     return clean_text 
 
+    return clean_text 
+
+
+async def stream_search_and_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, payload: dict):
+    """
+    Realiza busca via streaming e atualiza mensagem no Telegram em tempo real.
+    """
+    user_id = payload.get('user_id')
+    config = get_user_config(int(user_id))
+    
+    # Mensagem inicial (placeholder)
+    msg = await update.message.reply_text("🧠 _Pensando..._", parse_mode='Markdown')
+    
+    full_answer = ""
+    thinking_buffer = ""
+    citations = []
+    status_text = "Iniciando..."
+    
+    last_update_time = 0
+    import time
+    
+    try:
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            async with client.stream("POST", f"{MCP_API}/search_stream", json=payload) as response:
+                if response.status_code != 200:
+                    error_text = await response.aread()
+                    await msg.edit_text(f"❌ Erro no stream: {error_text.decode()[:200]}")
+                    return
+
+                async for line in response.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                        
+                    try:
+                        data = json.loads(line.replace("data: ", ""))
+                        
+                        # Atualiza estado local
+                        if "status" in data:
+                            status_text = data['status']
+                        
+                        if "thinking" in data:
+                            thinking_buffer = data['thinking']
+                            status_text = "Raciocinando..."
+                            
+                        if "citation" in data:
+                            citations.append(data['citation'])
+                            status_text = f"Encontradas {len(citations)} fontes..."
+                            
+                        if "chunk" in data:
+                            full_answer += data['chunk']
+                            status_text = "Escrevendo..."
+
+                        if "clarifying_question" in data:
+                            status_text = "❓ Aguardando resposta..."
+                            # Poderíamos adicionar um botão aqui se fosse interativo, 
+                            # mas por enquanto apenas avisa no status.
+                            full_answer += "\n\n❓ *Pergunta de Esclarecimento*: Por favor, responda abaixo para continuar."
+                            
+                        # Lógica de atualização da UI (Throttling ~1.5s)
+                        current_time = time.time()
+                        if current_time - last_update_time > 1.5 or "done" in data:
+                            # Monta o texto visual
+                            display_text = ""
+                            
+                            # 1. Bloco de Pensamento (Collapsible ou Quote)
+                            if thinking_buffer:
+                                # Mostra apenas as últimas linhas para não poluir, ou tudo em quote
+                                # Vamos mostrar um resumo
+                                th_preview = thinking_buffer[-200:].replace("\n", " ")
+                                display_text += f"🧠 _{th_preview}._\n\n"
+                            
+                            # 2. Status e Fontes
+                            if not full_answer:
+                                display_text += f"🔄 *{status_text}*\n"
+                                if citations:
+                                    display_text += f"📚 _{len(citations)} fontes lidas_\n"
+                            
+                            # 3. Resposta Real
+                            if full_answer:
+                                display_text += full_answer
+                            
+                            # Adiciona cursor piscando se não acabou
+                            if "done" not in data:
+                                display_text += " 🟢"
+                            
+                            # Tenta editar (com tratamento de erro de markdown)
+                            try:
+                                # Limite do Telegram
+                                if len(display_text) > 4000:
+                                    display_text = display_text[:4000] + "..."
+                                    
+                                await msg.edit_text(display_text, parse_mode='Markdown')
+                            except Exception:
+                                # Fallback para raw em caso de erro de parse
+                                try:
+                                    await msg.edit_text(display_text)
+                                except:
+                                    pass
+                                    
+                            last_update_time = current_time
+                            
+                        if "done" in data:
+                            # Garante que usamos a resposta completa e oficial do backend
+                            if 'answer' in data:
+                                full_answer = data['answer']
+                            break
+                            
+                    except json.JSONDecodeError:
+                        continue
+
+        # Formatação Final Bonita
+        final_text = ""
+        
+        # Opcional: Incluir raciocínio expandido se configurado
+        if config['reasoning'] and thinking_buffer:
+             final_text += f"🧠 *Raciocínio:*\n_{thinking_buffer}_\n\n---\n\n"
+        
+        final_text += full_answer
+        
+        if config['return_citations'] and citations:
+            final_text += "\n\n📚 *Fontes:*\n"
+            for i, cite in enumerate(citations[:5], 1):
+                title = cite.get('title', 'Link')
+                url = cite.get('url', '')
+                final_text += f"{i}. [{title}]({url})\n"
+        
+        # 🔗 Footer Informativo (Restaurado)
+        model_name = config.get('model', 'best')
+        focus_name = config.get('focus', 'web')
+        msg_count = data.get('conversation_info', {}).get('message_count', '?')
+        footer = f"\n` {model_name} | 🔍 {focus_name} | 💬 {msg_count} msg `"
+        final_text += footer
+        
+        # Só edita se for diferente do que já está (remove o cursor verde)
+        try:
+            # 1. Tenta extrair e enviar arquivos (isso é PRIORITÁRIO)
+            # A função extract_and_send_files agora é robusta e retorna o texto SEM os blocos de código
+            clean_text = await extract_and_send_files(update, final_text)
+            
+            # 2. Atualiza a mensagem final
+            await msg.edit_text(clean_text, parse_mode='Markdown', disable_web_page_preview=True)
+            
+        except Exception as e:
+            logger.error(f"Erro ao finalizar msg: {e}")
+            # Fallback: Tenta mandar sem markdown se falhar
+            try:
+                await msg.edit_text(final_text, disable_web_page_preview=True)
+            except Exception as e2:
+                logger.error(f"Erro fatal ao editar msg final: {e2}")
+
+    except Exception as e:
+        logger.error(f"Erro stream handler: {e}")
+        await msg.edit_text(f"❌ Erro: {e}")
+
+
+
+# ============= HANDLER DE LOCALIZAÇÃO =============
+
+async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Armazena localização do usuário para buscas locais"""
+    user_id = update.effective_user.id
+    location = update.message.location
+    
+    if location:
+        config = get_user_config(user_id)
+        config['lat'] = location.latitude
+        config['lon'] = location.longitude
+        save_user_config(user_id, config)
+        
+        await update.message.reply_text(
+            f"📍 *Localização Definida!*\n\n"
+            f"Lat: `{location.latitude:.4f}`\n"
+            f"Lon: `{location.longitude:.4f}`\n\n"
+            f"Próximas buscas usarão esta localização. Para limpar, use /config > Limpar Localização (se houver) ou apenas reinicie.",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text("❌ Erro ao ler localização.")
+
+
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Processa mensagens de texto"""
     user_id = update.effective_user.id
@@ -916,86 +1201,27 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
-    try:
-        async with httpx.AsyncClient(timeout=180.0) as client:
-            payload = {
-                "query": user_query,
-                "user_id": str(user_id),  # HISTÓRICO NATIVO!
-                "model": config['model'],
-                "focus": config['focus'],
-                "enable_reasoning": config['reasoning'],
-                "return_citations": config['return_citations'],
-                "return_images": config['return_images']
-            }
-            
-            response = await client.post(f"{MCP_API}/search", json=payload)
-            response.raise_for_status()
-            data = response.json()
-        
-        answer = data.get('answer', 'Sem resposta')
-        thinking = data.get('thinking')
-        conv_info = data.get('conversation_info', {})
-        
-        # Se tem thinking (raciocínio), mostra primeiro
-        if thinking and data.get('has_thinking'):
-            thinking_text = f"🧠 *Raciocínio interno:*\n_{thinking}_\n\n---\n\n"
-            # Usa chunked também para thinking se for muito grande
-            if len(thinking_text) > 4000:
-                 await reply_chunked(update, thinking_text)
-            else:
-                await update.message.reply_text(
-                    thinking_text,
-                    parse_mode='Markdown',
-                    disable_web_page_preview=True
-                )
-        
-        # Adiciona citações se ativado
-        if config['return_citations'] and data.get('citations'):
-            answer += "\n\n📚 *Fontes:*\n"
-            for i, cite in enumerate(data['citations'][:5], 1):
-                title = cite.get('title', 'Link')
-                url = cite.get('url', '')
-                answer += f"{i}. [{title}]({url})\n"
-        
-        # Badge de metadados com contador de mensagens nativo
-        msg_count = conv_info.get('message_count', 0)
-        thinking_badge = "🧠 " if data.get('has_thinking') else ""
-        is_new = "🌟 " if conv_info.get('is_new') else ""
-        answer += f"\n_{is_new}{thinking_badge}🤖 {data.get('model_used', config['model'])} | 🔍 {data.get('focus_mode', config['focus'])} | 💬 {msg_count} msg_"
-        
-        # Tenta extrair e enviar arquivos de código PRIMEIRO e pega texto limpo
-        clean_answer = await extract_and_send_files(update, answer)
-
-        # Envia resposta limpa (sem o código duplicado)
-        await reply_chunked(update, clean_answer)
-        
-        # Envia imagens se retornadas
-        if config['return_images'] and data.get('images'):
-            for img_url in data['images'][:3]:
-                try:
-                    await update.message.reply_photo(photo=img_url)
-                except Exception as e:
-                    logger.warning(f"Erro ao enviar imagem: {e}")
-        
-    except httpx.ConnectError:
-        await update.message.reply_text(
-            "❌ *Erro de conexão*\n\n"
-            "O servidor MCP não está respondendo.\n"
-            "Verifique se `perplexity_mcp.py` está rodando.",
-            parse_mode='Markdown'
-        )
-    except httpx.TimeoutException:
-        await update.message.reply_text(
-            "⏱️ *Timeout*\n\n"
-            "A busca demorou muito. Tente um modelo mais rápido (`/modelos`).",
-            parse_mode='Markdown'
-        )
-    except Exception as e:
-        logger.error(f"Erro: {e}")
-        await update.message.reply_text(
-            "❌ Erro ao processar. Use /config para verificar suas configurações.",
-            parse_mode='Markdown'
-        )
+    payload = {
+        "query": user_query,
+        "user_id": str(user_id),
+        "model": config['model'],
+        "focus": config['focus'],
+        "time_range": config.get('time_range', 'all'),
+        "enable_reasoning": config['reasoning'], # Não usado no stream ainda mas mantido
+        "time_range": config.get('time_range', 'all'),
+        "enable_reasoning": config['reasoning'], # Não usado no stream ainda mas mantido
+        "citation_mode": "markdown"
+    }
+    
+    # Adiciona coordenadas se existirem na config
+    if 'lat' in config and 'lon' in config:
+        payload['lat'] = config['lat']
+        payload['lon'] = config['lon']
+        # Feedback visual sutil (opcional)
+        # await update.message.reply_text("📍 Usando sua localização", disable_notification=True)
+    
+    # Usa a nova função de streaming
+    await stream_search_and_reply(update, context, payload)
 
 
 # ============= HANDLER DE IMAGENS =============
@@ -1124,7 +1350,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("modelos", cmd_modelos))
     app.add_handler(CommandHandler("busca", cmd_busca))
-    app.add_handler(CommandHandler("new", cmd_new))
+    app.add_handler(CommandHandler("denovo", cmd_denovo))
     app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("library", cmd_library))
     app.add_handler(CommandHandler("token", cmd_token))
@@ -1134,6 +1360,7 @@ def main() -> None:
     app.add_handler(CommandHandler("normal", cmd_normal))
     app.add_handler(CommandHandler("config", cmd_config))
     app.add_handler(CommandHandler("limpar", cmd_limpar))
+    app.add_handler(CommandHandler("tempo", cmd_tempo))
     app.add_handler(CommandHandler("ajuda", cmd_ajuda))
     
     # Callbacks (botões inline)
@@ -1142,6 +1369,7 @@ def main() -> None:
     # Mensagens
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
     # Webhook ou Polling

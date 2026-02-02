@@ -75,15 +75,23 @@ try:
     Perplexity = _Perplexity
     ConversationConfig = _ConversationConfig
     Models = _Models
+    Models = _Models
     CitationMode = _CitationMode
     
-    # Tenta importar SourceFocus (pode não existir em todas as versões)
+    # Tenta importar TimeRange e SourceFocus
     try:
         from perplexity_webui_scraper import SourceFocus as _SourceFocus
         SourceFocus = _SourceFocus
     except ImportError:
-        logger.warning("⚠️ SourceFocus não disponível nesta versão do scraper")
+        logger.warning("⚠️ SourceFocus não disponível")
         SourceFocus = None
+
+    try:
+        from perplexity_webui_scraper import TimeRange as _TimeRange
+        TimeRange = _TimeRange
+    except ImportError:
+        logger.warning("⚠️ TimeRange não disponível")
+        TimeRange = None
     
     SCRAPER_AVAILABLE = True
     logger.info("✅ Scraper perplexity-webui-scraper carregado com sucesso!")
@@ -99,14 +107,71 @@ except ImportError as e:
 
 # ============= CLIENTE PERPLEXITY =============
 
-client = None
-if SCRAPER_AVAILABLE and Perplexity and PERPLEXITY_SESSION_TOKEN and PERPLEXITY_SESSION_TOKEN != "seu_session_token_aqui":
-    try:
-        client = Perplexity(session_token=PERPLEXITY_SESSION_TOKEN)
-        logger.info("✅ Cliente Perplexity inicializado com sucesso!")
-    except Exception as e:
-        logger.error(f"❌ Erro ao inicializar cliente: {e}")
-        client = None
+# ============= GERENCIADOR DE CLIENTES =============
+
+class ClientManager:
+    def __init__(self):
+        self.default_client: Optional[Perplexity] = None
+        self.location_clients: Dict[str, Perplexity] = {} # "lat,lon" -> client
+        self.session_token = ""
+        
+    def init_default(self, token: str):
+        self.session_token = token
+        if SCRAPER_AVAILABLE and Perplexity and token and token != "seu_session_token_aqui":
+            try:
+                self.default_client = Perplexity(session_token=token)
+                logger.info("✅ Cliente Default inicializado!")
+            except Exception as e:
+                logger.error(f"❌ Erro config default client: {e}")
+
+    def get_client(self, lat: float = None, lon: float = None) -> Optional[Perplexity]:
+        # Se não tem coords, usa default
+        if lat is None or lon is None:
+            return self.default_client
+            
+        # Cria chave única para coords (arredondando para agrupar proximidade)
+        # 1 grau ~ 111km, 0.01 ~ 1.1km. Vamos usar 2 casas decimais (~1km precision)
+        key = f"{lat:.2f},{lon:.2f}"
+        
+        if key in self.location_clients:
+            return self.location_clients[key]
+            
+        # Cria novo cliente com coords
+        if SCRAPER_AVAILABLE and Perplexity and self.session_token:
+            try:
+                # Tenta criar config com coords
+                logger.info(f"📍 Criando novo cliente para local: {key}")
+                from perplexity_webui_scraper import Coordinates, ClientConfig
+                
+                # Nota: Na versão atual da lib, Coordinates pode ser passado no construtor?
+                # Vamos assumir que sim ou via config
+                # ClientConfig é passado no create_conversation, mas precisamos do Client configurado?
+                # A lib parece não expor Coordinates no __init__ do Perplexity, 
+                # mas vamos tentar passar config se possível ou ignorar se não suportado.
+                
+                # Investigação mostrou que ClientConfig aceita coordinates.
+                # E Perplexity aceita config?
+                # Não, Perplexity(session_token). 
+                # Mas create_conversation aceita config.
+                # ENTÃO: Não precisamos de múltiplos clientes! O mesmo cliente pode criar conversas com configs diferentes?
+                # Se a lib suporta isso, ótimo. Se não, (Coordinates geralmente vai no ClientConfig da conversa)
+                # Vamos verificar o teste: ClientConfig(coordinates=coords). create_conversation(config).
+                
+                # Se Coordinates vai no ConversationConfig, então só precisamos de UM cliente!
+                # E passamos Coordinates na hora de criar a conversa.
+                
+                return self.default_client
+                
+            except Exception as e:
+                logger.warning(f"Erro ao criar cliente local: {e}")
+                return self.default_client
+                
+        return self.default_client
+
+client_manager = ClientManager()
+if PERPLEXITY_SESSION_TOKEN:
+    client_manager.init_default(PERPLEXITY_SESSION_TOKEN)
+    client = client_manager.default_client # Fallback compatibility
 
 # ============= STORAGE DE CONVERSAS ATIVAS =============
 # Mantém uma conversa ativa por usuário para histórico nativo
@@ -284,6 +349,24 @@ def get_citation_mode(mode: str):
     return getattr(CitationMode, "MARKDOWN", None)
 
 
+def get_time_range(range_id: str):
+    """Converte ID de tempo para enum"""
+    if not SCRAPER_AVAILABLE or TimeRange is None:
+        return None
+        
+    range_id = range_id.upper()
+    mapping = {
+        "ALL": "ALL",
+        "DAY": "TODAY",
+        "WEEK": "LAST_WEEK", 
+        "MONTH": "LAST_MONTH",
+        "YEAR": "LAST_YEAR"
+    }
+    
+    attr = mapping.get(range_id, "ALL")
+    return getattr(TimeRange, attr, TimeRange.ALL)
+
+
 # ============= ENDPOINTS =============
 
 @app.route('/health', methods=['GET'])
@@ -295,8 +378,166 @@ def health_check():
         "client_initialized": client is not None,
         "source_focus_available": SourceFocus is not None,
         "active_conversations": len(active_conversations),
-        "version": "2.2.0"
+        "version": "2.3.0"
     })
+
+
+@app.route('/search_stream', methods=['POST'])
+@limiter.limit("20 per minute")
+def search_stream():
+    """
+    Endpoint de busca com STREAMING (SSE).
+    Retorna eventos: status, thinking, citation, chunk, done.
+    """
+    try:
+        data = request.json or {}
+        query = data.get('query')
+        user_id = str(data.get('user_id', 'default'))
+        model_id = data.get('model', 'best')
+        focus_id = data.get('focus', 'web')
+        time_range_id = data.get('time_range', 'all')
+        
+        if not query:
+            return jsonify({"error": "Query required"}), 400
+
+        if not SCRAPER_AVAILABLE or client is None:
+             return jsonify({"error": "Service unavailable"}), 503
+
+        # Configuração
+        model_enum = get_model_enum(model_id)
+        config_kwargs = {
+            "model": model_enum,
+             "language": "pt-BR",
+             "save_to_library": SAVE_TO_LIBRARY_ENABLED
+        }
+        
+        if SourceFocus is not None:
+             source_focus_enum = get_source_focus(focus_id)
+             if source_focus_enum:
+                 config_kwargs["source_focus"] = [source_focus_enum]
+
+        if TimeRange is not None:
+            config_kwargs["time_range"] = get_time_range(time_range_id)
+
+        config = ConversationConfig(**config_kwargs)
+        
+        # Reutiliza ou cria conversa
+        if user_id in active_conversations:
+             conversation = active_conversations[user_id]
+             # Opcional: atualizar config da conversa existente se suportado
+        else:
+             conversation = client.create_conversation(config)
+             active_conversations[user_id] = conversation
+
+        def generate():
+            # Evento inicial
+            yield f"data: {json.dumps({'status': 'Iniciando busca...'})}\n\n"
+            
+            full_response = ""
+            citations = []
+            
+            try:
+                # Usa o modo stream do scraper
+                # Nota: A biblioteca original usa stream_ask ou ask(stream=True) retornando generator
+                # Vamos assumir que conversation.stream_ask existe ou ask suporta stream
+                
+                # Adaptação para a API da biblioteca:
+                # Se a biblioteca retornar generator de Response:
+                response_generator = None
+                
+                # Tenta usar ask(..., stream=True) se a interface for essa
+                # Analisando o código da lib (core.py): ask retorna self, e _execute popula _stream_generator se stream=True
+                # E conversation é iterável (__iter__) se _stream_generator não for None
+                
+                conversation.ask(query, stream=True)
+                
+                last_thinking = ""
+                
+                for response_step in conversation:
+                    # Extrai dados do passo
+                    raw = response_step.raw_data
+                    
+                    # 1. Status/Thinking
+                    thinking = None
+                    if raw:
+                        thinking = raw.get('thinking') or raw.get('reasoning')
+                        # Se tiver steps (Sonar)
+                        if not thinking and 'steps' in raw:
+                             steps = raw.get('steps', [])
+                             if steps:
+                                 thinking = "\\n".join([s.get('content','') for s in steps if s.get('type')=='thinking'])
+
+                    if thinking and thinking != last_thinking:
+                         # Calcula o delta ou manda tudo? Manda tudo por enquanto
+                         yield f"data: {json.dumps({'thinking': thinking})}\n\n"
+                         last_thinking = thinking
+                    
+                    # 2. Citações (sources)
+                    current_results = getattr(response_step, 'search_results', [])
+                    if len(current_results) > len(citations):
+                        # Novas citações encontradas
+                        for i in range(len(citations), len(current_results)):
+                            src = current_results[i]
+                            cit_data = {
+                                'title': getattr(src, 'title', 'Fonte'),
+                                'url': getattr(src, 'url', '')
+                            }
+                            yield f"data: {json.dumps({'citation': cit_data})}\n\n"
+                        citations = current_results
+                    
+                    # 3. Chunk de Texto (Answer)
+                    # A biblioteca retorna o texto COMPLETO acumulado em response_step.answer
+                    # ou chunks parciais em response_step.chunks?
+                    # core.py diz: chunks = answer_data.get("chunks", [])
+                    # Vamos tentar capturar o delta do answer
+                    current_answer = response_step.answer or ""
+                    
+                    if len(current_answer) > len(full_response):
+                        delta = current_answer[len(full_response):]
+                        if delta:
+                            yield f"data: {json.dumps({'chunk': delta})}\n\n"
+                        full_response = current_answer
+                        
+                    # 4. Debug Canvas
+                    if 'canvas' in raw:
+                        logger.info(f"🎨 Canvas detected: {raw['canvas'].keys()}")
+                        # TODO: Emit file event
+
+                    # 5. Clarifying Questions
+                    # Alguns modelos retornam 'clarifying_question' boolean ou str
+                    # Ou 'text' é uma pergunta.
+                    # Vamos verificar se há flag explícita
+                    if raw.get('clarifying_question'):
+                        yield f"data: {json.dumps({'clarifying_question': True})}\n\n"
+                
+                # Final
+                # Final
+                final_payload = {
+                    "done": True,
+                    "answer": full_response,
+                    "citations": [{'title': getattr(c, 'title'), 'url': getattr(c, 'url')} for c in citations],
+                    "conversation_id": user_id, # ID local
+                    "backend_uuid": getattr(conversation, 'backend_uuid', None) # ID real do Perplexity
+                }
+                yield f"data: {json.dumps(final_payload)}\n\n"
+                
+                # Salva histórico
+                if user_id not in conversation_messages:
+                     conversation_messages[user_id] = []
+                conversation_messages[user_id].append({"role": "user", "content": query})
+                conversation_messages[user_id].append({"role": "assistant", "content": full_response})
+                conversation_message_counts[user_id] = conversation_message_counts.get(user_id, 0) + 1
+
+            except Exception as e:
+                logger.error(f"Erro no stream: {e}")
+                error_payload = {"error": str(e)}
+                yield f"data: {json.dumps(error_payload)}\n\n"
+
+        return app.response_class(generate(), mimetype='text/event-stream')
+
+    except Exception as e:
+        logger.error(f"Erro /search_stream: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/models', methods=['GET'])
@@ -341,6 +582,7 @@ def search():
         "user_id": "string (identificador do usuário)",
         "model": "best|sonar|deep-research|gpt-5.2|claude-4.5-sonnet|...",
         "focus": "web|academic|youtube|reddit|wolfram",
+        "time_range": "all|day|week|month|year",
         "citation_mode": "default|markdown|clean"
     }
     
@@ -380,6 +622,7 @@ def search():
         user_id = str(data.get('user_id', 'default'))
         model_id = data.get('model', 'best')
         focus_id = data.get('focus', 'web')
+        time_range_id = data.get('time_range', 'all')
         citation_mode = data.get('citation_mode', 'markdown')
         
         # Verifica se o scraper está disponível
@@ -414,6 +657,25 @@ def search():
                 "save_to_library": SAVE_TO_LIBRARY_ENABLED
             }
             
+            # Adiciona time_range se disponível
+            if TimeRange is not None:
+                config_kwargs["time_range"] = get_time_range(time_range_id)
+            
+            # Adiciona coordenadas se fornecidas
+            lat = data.get('lat')
+            lon = data.get('lon')
+            if lat is not None and lon is not None:
+                try:
+                    from perplexity_webui_scraper import Coordinates
+                    config_kwargs["coordinates"] = Coordinates(
+                        latitude=float(lat), 
+                        longitude=float(lon), 
+                        accuracy=20.0
+                    )
+                    logger.info(f"📍 Configurando busca local: {lat}, {lon}")
+                except Exception as e:
+                    logger.warning(f"Erro ao configurar coords: {e}")
+
             # Adiciona source_focus apenas se disponível
             if SourceFocus is not None:
                 source_focus_enum = get_source_focus(focus_id)
@@ -510,19 +772,22 @@ def search():
                 })
         
         response = {
+            "status": "success",
             "answer": answer,
             "thinking": thinking,
             "model_used": model_id,
             "focus_mode": focus_id,
+            "time_range": time_range_id,
             "citations": citations,
             "has_thinking": thinking is not None,
             "conversation_info": {
-                "user_id": user_id,
-                "message_count": msg_count,
-                "is_new": is_new_conversation
+                "id": user_id,
+                "uuid": getattr(conversation, 'backend_uuid', None),
+                "model": model_id,
+                "message_count": conversation_message_counts.get(user_id, 0)
             }
         }
-        
+
         # Limpeza de arquivos temporários
         for fpath in files_to_upload:
             try:
@@ -536,6 +801,28 @@ def search():
         logger.error(f"Erro em /search: {e}")
         logger.error(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/last_response', methods=['GET'])
+def get_last_response():
+    """Retorna a última resposta gerada para o usuário (Retry)"""
+    user_id = request.args.get('user_id', 'default')
+    
+    if user_id not in conversation_messages:
+        return jsonify({"error": "No history found"}), 404
+        
+    messages = conversation_messages[user_id]
+    if not messages:
+        return jsonify({"error": "Empty history"}), 404
+        
+    # Procura a última msg do assistant de trás pra frente
+    for msg in reversed(messages):
+        if msg['role'] == 'assistant':
+            return jsonify({
+                "answer": msg['content'],
+            })
+            
+    return jsonify({"error": "No assistant message found"}), 404
 
 
 @app.route('/clear', methods=['POST'])
