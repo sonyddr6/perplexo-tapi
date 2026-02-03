@@ -86,6 +86,10 @@ if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == "seu_token_aqui":
 
 user_preferences: Dict[int, Dict[str, Any]] = {}
 
+# Buffer de arquivos pendentes (até 9 arquivos por usuário)
+# Formato: {user_id: [{"name": str, "bytes": bytes, "mime": str, "timestamp": float}, ...]}
+pending_files: Dict[int, list] = {}
+
 
 def get_user_config(user_id: int) -> Dict[str, Any]:
     """Retorna configuração do usuário ou padrão"""
@@ -1333,8 +1337,11 @@ async def extract_and_send_files(update: Update, text: str) -> str:
         content = match.group(2)
         full_block = match.group(0)
         
-        # Ignora blocos muito pequenos (menos de 50 chars) para evitar spam
-        if len(content) < 50:
+        # Conta linhas do bloco
+        line_count = content.count('\n') + 1
+        
+        # Ignora blocos curtos (<= 50 linhas) - mantém inline no chat
+        if line_count <= 50:
             continue
             
         ext = EXT_MAP.get(lang, '.txt')
@@ -1581,22 +1588,28 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Processa mensagens de texto"""
+    """Processa mensagens de texto (e arquivos pendentes se houver)"""
     user_id = update.effective_user.id
     user_query = update.message.text
     config = get_user_config(user_id)
     
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
+    # Verifica se há arquivos pendentes para processar em batch
+    if user_id in pending_files and len(pending_files[user_id]) > 0:
+        # Processa em batch
+        files_to_process = pending_files.pop(user_id)  # Remove do buffer
+        await process_files_batch(update, context, user_query, files_to_process, config)
+        return
+    
+    # Fluxo normal (sem arquivos pendentes)
     payload = {
         "query": user_query,
         "user_id": str(user_id),
         "model": config['model'],
         "focus": config['focus'],
         "time_range": config.get('time_range', 'all'),
-        "enable_reasoning": config['reasoning'], # Não usado no stream ainda mas mantido
-        "time_range": config.get('time_range', 'all'),
-        "enable_reasoning": config['reasoning'], # Não usado no stream ainda mas mantido
+        "enable_reasoning": config['reasoning'],
         "citation_mode": "markdown"
     }
     
@@ -1604,11 +1617,62 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if 'lat' in config and 'lon' in config:
         payload['lat'] = config['lat']
         payload['lon'] = config['lon']
-        # Feedback visual sutil (opcional)
-        # await update.message.reply_text("📍 Usando sua localização", disable_notification=True)
     
     # Usa a nova função de streaming
     await stream_search_and_reply(update, context, payload)
+
+
+async def process_files_batch(update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                               query: str, files: list, config: dict) -> None:
+    """Processa múltiplos arquivos em uma única request"""
+    user_id = update.effective_user.id
+    
+    msg = await update.message.reply_text(
+        f"🔄 *Processando {len(files)} arquivo(s)...*",
+        parse_mode='Markdown'
+    )
+    
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            # Metadados
+            data_payload = {
+                "query": query,
+                "user_id": str(user_id),
+                "model": config['model'],
+                "focus": "web",
+                "return_citations": "false"
+            }
+            
+            # Monta lista de arquivos para multipart
+            # Formato: [('file', (nome, bytes, mime)), ('file', ...), ...]
+            files_payload = [
+                ('file', (f['name'], f['bytes'], f['mime'])) 
+                for f in files
+            ]
+            
+            response = await client.post(
+                f"{MCP_API}/search",
+                data=data_payload,
+                files=files_payload
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Erro MCP batch: {response.text}")
+                await msg.edit_text(f"❌ Erro ao processar arquivos: {response.status_code}")
+                return
+            
+            data = response.json()
+        
+        answer = data.get('answer', 'Sem resposta')
+        clean_answer = await extract_and_send_files(update, answer)
+        
+        await msg.delete()
+        await reply_chunked(update, clean_answer)
+        
+    except Exception as e:
+        logger.error(f"Erro batch upload: {e}")
+        await msg.edit_text(f"❌ Erro: {e}")
+
 
 
 # ============= HANDLER DE IMAGENS =============
@@ -1656,72 +1720,67 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 # ============= HANDLER DE DOCUMENTOS =============
 
+MAX_PENDING_FILES = 9
+FILE_TIMEOUT_SECONDS = 120  # 2 minutos
+
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Processa arquivos de texto"""
+    """Acumula arquivos no buffer. Processa quando usuário enviar texto."""
     user_id = update.effective_user.id
-    config = get_user_config(user_id)
     
     document = update.message.document
     file_name = document.file_name or f"arquivo_{document.file_id}"
     mime_type = document.mime_type or "application/octet-stream"
     
-    # Lista negra de extensões perigosas (opcional, mas bom pra segurança)
+    # Lista negra de extensões perigosas
     BLOCKED_EXTENSIONS = ('.exe', '.bat', '.cmd', '.sh', '.bin')
     if file_name.lower().endswith(BLOCKED_EXTENSIONS):
         await update.message.reply_text("⚠️ Tipo de arquivo não permitido por segurança.")
         return
-
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_document")
     
     try:
-        # Download do arquivo (em memória)
+        # Download do arquivo
         telegram_file = await document.get_file()
         file_bytes = await telegram_file.download_as_bytearray()
         
-        # Prepara a query
-        user_query = update.message.caption or f"Analise o arquivo {file_name}"
+        # Inicializa buffer se não existe
+        if user_id not in pending_files:
+            pending_files[user_id] = []
         
-        # Envia para MCP via Multipart Upload
-        async with httpx.AsyncClient(timeout=300.0) as client:  # 5 min para uploads grandes
-            # Metadados como campos de formulário
-            data_payload = {
-                "query": user_query,
-                "user_id": str(user_id),
-                "model": config['model'],
-                "focus": "web",
-                "return_citations": "false" # string para form-data
-            }
-            
-            # Arquivo
-            files_payload = {
-                'file': (file_name, file_bytes, mime_type)
-            }
-            
-            # POST /search (agora aceita multipart)
-            response = await client.post(
-                f"{MCP_API}/search",
-                data=data_payload,
-                files=files_payload
+        # Limpa arquivos antigos (timeout)
+        current_time = time.time()
+        pending_files[user_id] = [
+            f for f in pending_files[user_id] 
+            if current_time - f['timestamp'] < FILE_TIMEOUT_SECONDS
+        ]
+        
+        # Verifica limite
+        if len(pending_files[user_id]) >= MAX_PENDING_FILES:
+            await update.message.reply_text(
+                f"⚠️ Limite de {MAX_PENDING_FILES} arquivos atingido.\n"
+                "Envie sua pergunta para processar ou use /limpar para recomeçar."
             )
-            
-            # Verifica erro
-            if response.status_code != 200:
-                logger.error(f"Erro MCP: {response.text}")
-                raise Exception(f"MCP retornou erro {response.status_code}")
-                
-            data = response.json()
+            return
         
-        # Processa a resposta
-        answer = data.get('answer', 'Sem resposta')
-        clean_answer = await extract_and_send_files(update, answer)
-        await reply_chunked(update, clean_answer)
+        # Adiciona ao buffer
+        pending_files[user_id].append({
+            'name': file_name,
+            'bytes': bytes(file_bytes),
+            'mime': mime_type,
+            'timestamp': current_time
+        })
         
-    except Exception as e:
-        logger.error(f"Erro ao processar documento: {e}")
+        count = len(pending_files[user_id])
+        file_list = "\n".join([f"  • {f['name']}" for f in pending_files[user_id]])
+        
         await update.message.reply_text(
-            f"❌ Erro ao enviar arquivo: {e}",
+            f"📎 *{count} arquivo(s) recebido(s):*\n{file_list}\n\n"
+            f"Envie mais arquivos (até {MAX_PENDING_FILES}) ou digite sua pergunta para processar.",
             parse_mode='Markdown'
         )
+        
+    except Exception as e:
+        logger.error(f"Erro ao receber documento: {e}")
+        await update.message.reply_text(f"❌ Erro ao receber arquivo: {e}")
 
 
 # ============= POST INIT =============
