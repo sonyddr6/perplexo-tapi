@@ -1612,6 +1612,34 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
 
+# ============= POST INIT =============
+
+async def post_init(application: Application) -> None:
+    """Executado após a inicialização da aplicação, dentro do loop de eventos"""
+    logger.info("🚀 Executando post_init...")
+    
+    # Inicia Scheduler (agora que temos loop)
+    tm = get_task_manager()
+    if tm and tm.scheduler:
+        try:
+            tm.scheduler.start()
+            logger.info("📅 APScheduler iniciado com sucesso!")
+        except Exception as e:
+            logger.warning(f"⚠️ Scheduler já rodando ou erro: {e}")
+
+    # Define comandos
+    await application.bot.set_my_commands([
+        BotCommand("start", "Menu Principal"),
+        BotCommand("busca", "Nova Busca"),
+        BotCommand("new", "Nova Conversa"),
+        BotCommand("tarefas", "Gerenciar Tarefas"),
+        BotCommand("modelos", "Trocar Modelo"),
+        BotCommand("config", "Configurações"),
+        BotCommand("ajuda", "Ajuda")
+    ])
+    logger.info("✅ Comandos registrados no Telegram")
+
+
 # ============= MAIN =============
 
 def main() -> None:
@@ -1622,8 +1650,8 @@ def main() -> None:
     scheduler = None
     if SCHEDULER_AVAILABLE:
         scheduler = AsyncIOScheduler()
-        scheduler.start()
-        logger.info("📅 APScheduler inicializado")
+        # scheduler.start()  <-- Removido: Seráiciado no post_init
+        logger.info("📅 APScheduler inicializado (aguardando start)")
     
     # Callback para executar tarefas agendadas
     async def execute_scheduled_task(user_id: int, task: Task):
