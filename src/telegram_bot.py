@@ -73,6 +73,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 MCP_API = os.getenv("MCP_API_URL", "http://127.0.0.1:5000")
+VPN_API = os.getenv("VPN_API_URL", "http://127.0.0.1:8000")  # Gluetun control server
 TELEGRAM_PORT = int(os.getenv("TELEGRAM_PORT", 8000))
 
 # Verifica token
@@ -956,6 +957,112 @@ async def cmd_library(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("❌ Erro ao alterar configuração.", parse_mode='Markdown')
 
 
+# ============= COMANDO /vpn =============
+
+async def cmd_vpn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Controle da VPN: status, ativar/desativar, reconectar"""
+    msg = await update.message.reply_text("🔄 *Verificando VPN...*", parse_mode='Markdown')
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # Obtém status atual
+            try:
+                status_resp = await client.get(f"{VPN_API}/v1/openvpn/status")
+                status_data = status_resp.json()
+                vpn_status = status_data.get('status', 'unknown')
+            except:
+                vpn_status = 'offline'
+            
+            # Obtém IP público
+            try:
+                ip_resp = await client.get(f"{VPN_API}/v1/publicip/ip")
+                ip_data = ip_resp.json()
+                public_ip = ip_data.get('public_ip', 'Desconhecido')
+            except:
+                public_ip = 'Erro ao obter'
+            
+            # Emoji de status
+            if vpn_status == 'running':
+                status_emoji = "🟢"
+                status_text = "Conectada"
+            elif vpn_status == 'stopped':
+                status_emoji = "🔴"
+                status_text = "Desconectada"
+            else:
+                status_emoji = "⚪"
+                status_text = vpn_status.capitalize()
+        
+        # Monta mensagem
+        text = (
+            f"🔐 *Controle VPN*\n\n"
+            f"{status_emoji} *Status:* {status_text}\n"
+            f"🌐 *IP Público:* `{public_ip}`\n\n"
+            f"Selecione uma ação:"
+        )
+        
+        # Botões
+        buttons = []
+        if vpn_status == 'running':
+            buttons.append([
+                InlineKeyboardButton("🔄 Novo IP", callback_data="vpn_reconnect"),
+                InlineKeyboardButton("🔴 Desativar", callback_data="vpn_stop")
+            ])
+        else:
+            buttons.append([
+                InlineKeyboardButton("🟢 Ativar", callback_data="vpn_start")
+            ])
+        
+        buttons.append([InlineKeyboardButton("🔙 Voltar", callback_data="back_main")])
+        
+        await msg.edit_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
+        
+    except Exception as e:
+        logger.error(f"Erro cmd_vpn: {e}")
+        await msg.edit_text(f"❌ Erro ao verificar VPN: {e}", parse_mode='Markdown')
+
+
+async def handle_vpn_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Handler para callbacks de VPN"""
+    query = update.callback_query
+    data = query.data
+    
+    if not data.startswith("vpn_"):
+        return False
+    
+    await query.answer()
+    
+    action = data.replace("vpn_", "")
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            if action == "start":
+                await query.edit_message_text("🔌 *Ativando VPN...*", parse_mode='Markdown')
+                await client.put(f"{VPN_API}/v1/openvpn/status", json={"status": "running"})
+                await asyncio.sleep(3)  # Aguarda conexão
+                
+            elif action == "stop":
+                await query.edit_message_text("🔌 *Desativando VPN...*", parse_mode='Markdown')
+                await client.put(f"{VPN_API}/v1/openvpn/status", json={"status": "stopped"})
+                await asyncio.sleep(1)
+                
+            elif action == "reconnect":
+                await query.edit_message_text("🔄 *Reconectando VPN (novo IP)...*", parse_mode='Markdown')
+                # Stop then start para forçar novo servidor
+                await client.put(f"{VPN_API}/v1/openvpn/status", json={"status": "stopped"})
+                await asyncio.sleep(2)
+                await client.put(f"{VPN_API}/v1/openvpn/status", json={"status": "running"})
+                await asyncio.sleep(5)  # Aguarda reconexão
+        
+        # Atualiza status após ação
+        await cmd_vpn(update, context)
+        
+    except Exception as e:
+        logger.error(f"Erro VPN action {action}: {e}")
+        await query.edit_message_text(f"❌ Erro: {e}", parse_mode='Markdown')
+    
+    return True
+
+
 # ============= COMANDO /token =============
 async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Atualiza o Token de Sessão Dinamicamente"""
@@ -1038,7 +1145,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     data = query.data
     
-    # Processa callbacks de tarefas primeiro
+    # Processa callbacks de VPN primeiro
+    if data.startswith("vpn_"):
+        await handle_vpn_callback(update, context)
+        return
+    
+    # Processa callbacks de tarefas
     if data.startswith("task_"):
         await handle_task_callback(update, context)
         return
@@ -1632,6 +1744,7 @@ async def post_init(application: Application) -> None:
         BotCommand("start", "Menu Principal"),
         BotCommand("busca", "Nova Busca"),
         BotCommand("new", "Nova Conversa"),
+        BotCommand("vpn", "Controle VPN"),
         BotCommand("tarefas", "Gerenciar Tarefas"),
         BotCommand("modelos", "Trocar Modelo"),
         BotCommand("config", "Configurações"),
@@ -1712,7 +1825,9 @@ def main() -> None:
     app.add_handler(CommandHandler("local", cmd_local))
     app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("library", cmd_library))
+    app.add_handler(CommandHandler("vpn", cmd_vpn))
     app.add_handler(CommandHandler("token", cmd_token))
+
     app.add_handler(CommandHandler("historico", cmd_historico))
     app.add_handler(CommandHandler("teste", cmd_teste))
     app.add_handler(CommandHandler("importar", cmd_importar))
