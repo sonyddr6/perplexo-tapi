@@ -26,7 +26,20 @@ import base64
 import logging
 import asyncio
 import json
+import re
+import time
 from typing import Dict, Any, Optional
+
+# APScheduler para tarefas agendadas
+try:
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    SCHEDULER_AVAILABLE = True
+except ImportError:
+    SCHEDULER_AVAILABLE = False
+    AsyncIOScheduler = None
+
+# Task Manager local
+from task_manager import Task, init_task_manager, get_task_manager
 
 from telegram import (
     Update,
@@ -692,8 +705,232 @@ async def cmd_denovo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(f"❌ Erro ao tentar recuperar: {e}")
 
 
-# ============= COMANDO /library =============
+# ============= DETECÇÃO DE TAREFAS =============
 
+def detect_task_proposal(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Detecta propostas de tarefa no texto da resposta.
+    Retorna dict com dados da tarefa ou None.
+    """
+    # Padrões comuns de proposta de tarefa
+    task_patterns = [
+        r"##\s*Detalhes da Tarefa",
+        r"\*\*Nome\*\*:\s*(.+)",
+        r"\*\*Prompt\*\*:\s*(.+)",
+        r"\*\*Agendamento\*\*:\s*(.+)",
+        r"Vou propor.*tarefa",
+        r"criar uma tarefa.*agend",
+    ]
+    
+    # Verifica se parece uma proposta de tarefa
+    is_task = any(re.search(p, text, re.IGNORECASE) for p in task_patterns[:2])
+    if not is_task:
+        return None
+    
+    # Extrai dados
+    result = {
+        "name": None,
+        "prompt": None,
+        "schedule_type": "daily",
+        "schedule_time": "09:00"
+    }
+    
+    # Nome
+    match = re.search(r"\*\*Nome\*\*:\s*(.+?)(?:\n|$)", text)
+    if match:
+        result["name"] = match.group(1).strip()
+    
+    # Prompt
+    match = re.search(r"\*\*Prompt\*\*:\s*[\"']?(.+?)[\"']?(?:\n|$)", text)
+    if match:
+        result["prompt"] = match.group(1).strip()
+    
+    # Agendamento
+    match = re.search(r"\*\*Agendamento\*\*:\s*(.+?)(?:\n|$)", text)
+    if match:
+        sched_text = match.group(1).lower()
+        if "diário" in sched_text or "daily" in sched_text or "todo dia" in sched_text:
+            result["schedule_type"] = "daily"
+        elif "uma vez" in sched_text or "once" in sched_text:
+            result["schedule_type"] = "once"
+        
+        # Extrai horário
+        time_match = re.search(r"(\d{1,2}):(\d{2})", sched_text)
+        if time_match:
+            result["schedule_time"] = f"{int(time_match.group(1)):02d}:{time_match.group(2)}"
+        else:
+            # Tenta pegar hora AM/PM
+            time_match = re.search(r"(\d{1,2})\s*(AM|PM)", sched_text, re.IGNORECASE)
+            if time_match:
+                hour = int(time_match.group(1))
+                if time_match.group(2).upper() == "PM" and hour < 12:
+                    hour += 12
+                result["schedule_time"] = f"{hour:02d}:00"
+    
+    # Valida se tem dados mínimos
+    if result["name"] or result["prompt"]:
+        return result
+    
+    return None
+
+
+async def send_task_confirmation(update: Update, task: Task) -> None:
+    """Envia mensagem de confirmação com botões para a tarefa proposta"""
+    text = (
+        f"📋 *Proposta de Tarefa*\n\n"
+        f"*Nome:* {task.name}\n"
+        f"*Prompt:* _{task.prompt[:100]}{'...' if len(task.prompt) > 100 else ''}_\n"
+        f"*Tipo:* {task.schedule_type}\n"
+        f"*Horário:* {task.schedule_time}\n\n"
+        f"Confirme para ativar:"
+    )
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Confirmar", callback_data=f"task_confirm_{task.task_id}"),
+            InlineKeyboardButton("❌ Cancelar", callback_data=f"task_cancel_{task.task_id}")
+        ],
+        [
+            InlineKeyboardButton("🔁 Editar Horário", callback_data=f"task_edit_{task.task_id}")
+        ]
+    ]
+    
+    await update.message.reply_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+# ============= COMANDO /tarefas =============
+
+async def cmd_tarefas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Lista tarefas ativas do usuário"""
+    user_id = update.effective_user.id
+    tm = get_task_manager()
+    
+    if not tm:
+        await update.message.reply_text("❌ Gerenciador de tarefas não disponível.")
+        return
+    
+    tasks = tm.get_tasks(user_id)
+    
+    if not tasks:
+        await update.message.reply_text(
+            "📋 *Suas Tarefas*\n\n"
+            "_Você não tem tarefas agendadas._\n\n"
+            "Peça ao bot para criar uma tarefa, exemplo:\n"
+            '"Crie uma tarefa para me avisar o preço do Bitcoin todo dia às 9h"',
+            parse_mode='Markdown'
+        )
+        return
+    
+    text = "📋 *Suas Tarefas Ativas:*\n\n"
+    keyboard = []
+    
+    for task in tasks:
+        status = "✅" if task.enabled else "⏸️"
+        text += f"{status} *{task.name}*\n"
+        text += f"   ⏰ {task.schedule_type} às {task.schedule_time}\n"
+        if task.last_run:
+            text += f"   📅 Última exec: {task.last_run[:16]}\n"
+        text += "\n"
+        
+        keyboard.append([
+            InlineKeyboardButton(f"🗑️ {task.name[:15]}", callback_data=f"task_delete_{task.task_id}")
+        ])
+    
+    await update.message.reply_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
+    )
+
+
+# ============= CALLBACK HANDLER DE TAREFAS =============
+
+async def handle_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Processa callbacks relacionados a tarefas. Retorna True se processou."""
+    query = update.callback_query
+    data = query.data
+    
+    if not data.startswith("task_"):
+        return False
+    
+    await query.answer()
+    user_id = query.from_user.id
+    tm = get_task_manager()
+    
+    if not tm:
+        await query.edit_message_text("❌ Gerenciador de tarefas não disponível.")
+        return True
+    
+    if data.startswith("task_confirm_"):
+        task_id = data.replace("task_confirm_", "")
+        task = tm.confirm_pending_task(task_id)
+        
+        if task:
+            await query.edit_message_text(
+                f"✅ *Tarefa Ativada!*\n\n"
+                f"*{task.name}*\n"
+                f"Será executada {task.schedule_type} às {task.schedule_time}.",
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text("❌ Tarefa não encontrada ou já confirmada.")
+    
+    elif data.startswith("task_cancel_"):
+        task_id = data.replace("task_cancel_", "")
+        tm.cancel_pending_task(task_id)
+        await query.edit_message_text("❌ Tarefa cancelada.")
+    
+    elif data.startswith("task_edit_"):
+        task_id = data.replace("task_edit_", "")
+        # Mostra opções de horário
+        keyboard = [
+            [
+                InlineKeyboardButton("06:00", callback_data=f"task_time_{task_id}_06:00"),
+                InlineKeyboardButton("09:00", callback_data=f"task_time_{task_id}_09:00"),
+                InlineKeyboardButton("12:00", callback_data=f"task_time_{task_id}_12:00"),
+            ],
+            [
+                InlineKeyboardButton("15:00", callback_data=f"task_time_{task_id}_15:00"),
+                InlineKeyboardButton("18:00", callback_data=f"task_time_{task_id}_18:00"),
+                InlineKeyboardButton("21:00", callback_data=f"task_time_{task_id}_21:00"),
+            ]
+        ]
+        await query.edit_message_text(
+            "🕐 Escolha o horário:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    elif data.startswith("task_time_"):
+        # task_time_{task_id}_{time}
+        parts = data.split("_")
+        task_id = parts[2]
+        new_time = parts[3]
+        
+        if task_id in tm.pending_tasks:
+            tm.pending_tasks[task_id].schedule_time = new_time
+            task = tm.confirm_pending_task(task_id)
+            await query.edit_message_text(
+                f"✅ *Tarefa Ativada!*\n\n"
+                f"*{task.name}*\n"
+                f"Será executada às *{new_time}*.",
+                parse_mode='Markdown'
+            )
+    
+    elif data.startswith("task_delete_"):
+        task_id = data.replace("task_delete_", "")
+        if tm.delete_task(user_id, task_id):
+            await query.edit_message_text("🗑️ Tarefa removida com sucesso!")
+        else:
+            await query.edit_message_text("❌ Erro ao remover tarefa.")
+    
+    return True
+
+
+# ============= COMANDO /library =============
 
 async def cmd_library(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Alterna o modo Save to Library (Nuvem)"""
@@ -799,10 +1036,16 @@ async def cmd_teste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler para todos os botões inline"""
     query = update.callback_query
+    data = query.data
+    
+    # Processa callbacks de tarefas primeiro
+    if data.startswith("task_"):
+        await handle_task_callback(update, context)
+        return
+    
     await query.answer()
     
     user_id = update.effective_user.id
-    data = query.data
     
     # Navegação
     if data == 'back_main':
@@ -1168,6 +1411,38 @@ async def stream_search_and_reply(update: Update, context: ContextTypes.DEFAULT_
         await msg.edit_text(f"❌ Erro: {e}")
 
 
+# ============= COMANDO /local =============
+
+async def cmd_local(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle de localização: liga/desliga busca local"""
+    user_id = update.effective_user.id
+    config = get_user_config(user_id)
+    
+    has_location = config.get('lat') is not None and config.get('lon') is not None
+    
+    if has_location:
+        # Remove coords
+        config.pop('lat', None)
+        config.pop('lon', None)
+        save_user_config(user_id, config)
+        await update.message.reply_text(
+            "📍 *Localização DESATIVADA*\n\n"
+            "Suas buscas agora serão globais.\n"
+            "Para reativar, envie sua localização pelo 📎 clip.",
+            parse_mode='Markdown'
+        )
+    else:
+        # Pede para enviar
+        await update.message.reply_text(
+            "📍 *Localização não configurada*\n\n"
+            "Para ativar buscas locais:\n"
+            "1. Clique no 📎 (clip) no Telegram\n"
+            "2. Selecione *Localização*\n"
+            "3. Envie sua localização atual\n\n"
+            "Depois disso, `/local` para desligar.",
+            parse_mode='Markdown'
+        )
+
 
 # ============= HANDLER DE LOCALIZAÇÃO =============
 
@@ -1343,6 +1618,60 @@ def main() -> None:
     """Inicia o bot"""
     logger.info("🚀 Iniciando Perplexo Bot...")
     
+    # Inicializa APScheduler se disponível
+    scheduler = None
+    if SCHEDULER_AVAILABLE:
+        scheduler = AsyncIOScheduler()
+        scheduler.start()
+        logger.info("📅 APScheduler inicializado")
+    
+    # Callback para executar tarefas agendadas
+    async def execute_scheduled_task(user_id: int, task: Task):
+        """Callback executado pelo scheduler quando uma tarefa dispara"""
+        logger.info(f"⏰ Executando tarefa agendada: {task.name} para user {user_id}")
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    f"{MCP_API}/search_stream",
+                    json={
+                        "query": task.prompt,
+                        "user_id": str(user_id),
+                        "model": task.model,
+                        "focus": "web"
+                    }
+                )
+                
+                if response.status_code == 200:
+                    # Processa resposta do stream
+                    full_answer = ""
+                    async for line in response.aiter_lines():
+                        if line.startswith("data: "):
+                            try:
+                                data = json.loads(line[6:])
+                                if "chunk" in data:
+                                    full_answer += data['chunk']
+                                if "answer" in data:
+                                    full_answer = data['answer']
+                            except:
+                                pass
+                    
+                    # Envia notificação via Telegram
+                    from telegram import Bot
+                    bot = Bot(token=TELEGRAM_TOKEN)
+                    msg_text = f"📋 *Tarefa: {task.name}*\n\n{full_answer[:3900]}"
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text=msg_text,
+                        parse_mode='Markdown'
+                    )
+                    logger.info(f"✅ Notificação enviada para {user_id}")
+        except Exception as e:
+            logger.error(f"Erro ao executar tarefa {task.task_id}: {e}")
+    
+    # Inicializa TaskManager com scheduler
+    init_task_manager(scheduler=scheduler, execute_callback=execute_scheduled_task)
+    logger.info("📋 TaskManager inicializado")
+    
     # Cria aplicação
     app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     
@@ -1351,6 +1680,8 @@ def main() -> None:
     app.add_handler(CommandHandler("modelos", cmd_modelos))
     app.add_handler(CommandHandler("busca", cmd_busca))
     app.add_handler(CommandHandler("denovo", cmd_denovo))
+    app.add_handler(CommandHandler("tarefas", cmd_tarefas))
+    app.add_handler(CommandHandler("local", cmd_local))
     app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("library", cmd_library))
     app.add_handler(CommandHandler("token", cmd_token))
