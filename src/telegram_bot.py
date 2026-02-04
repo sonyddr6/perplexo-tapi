@@ -180,23 +180,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     keyboard = [
         [
-            InlineKeyboardButton("🤖 Modelo", callback_data='menu_modelos'),
-            InlineKeyboardButton("🔍 Busca", callback_data='menu_busca')
+            InlineKeyboardButton("✨ Nova Conversa", callback_data='menu_new'),
+            InlineKeyboardButton("📂 Histórico", callback_data='menu_history')
         ],
         [
-            InlineKeyboardButton("💬 Normal", callback_data='menu_normal'),
-            InlineKeyboardButton("⚙️ Config", callback_data='menu_config')
+            InlineKeyboardButton("🤖 Modelo", callback_data='menu_modelos'),
+            InlineKeyboardButton("🔍 Busca", callback_data='menu_busca'),
+            InlineKeyboardButton("⏱ Tempo", callback_data='menu_tempo')
         ],
-        [InlineKeyboardButton("❓ Ajuda", callback_data='menu_ajuda')]
+        [
+            InlineKeyboardButton("🔑 Tokens", callback_data='menu_tokens'),
+            InlineKeyboardButton("📅 Tarefas", callback_data='menu_tasks'),
+            InlineKeyboardButton("☁️ Library", callback_data='menu_library')
+        ],
+        [
+            InlineKeyboardButton("⚙️ Config", callback_data='menu_config'),
+            InlineKeyboardButton("❓ Ajuda", callback_data='menu_ajuda')
+        ]
     ]
     
     text = (
-        f"🌀 *Perplexo Bot* - Perplexity AI 2026\n\n"
-        f"*Configuração Atual:*\n"
+        f"🌀 *Perplexo Bot* - Painel de Controle\n\n"
+        f"*Status Atual:*\n"
         f"🤖 Modelo: `{config['model']}`\n"
         f"🔍 Focus: `{config['focus']}`\n"
-        f"💬 Modo: `{config['mode']}`\n\n"
-        f"_Envie sua pergunta ou use os botões abaixo:_"
+        f"💬 Modo: `{config['mode']}`\n"
+        f"☁️ Library: `{'ON' if config.get('save_to_library') else 'OFF'}`\n\n"
+        f"_Selecione uma opção:_"
     )
     
     if update.message:
@@ -206,11 +216,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode='Markdown'
         )
     elif update.callback_query:
-        await update.callback_query.edit_message_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
-        )
+        # Se for o mesmo texto, ignora erro de edição
+        try:
+            await update.callback_query.edit_message_text(
+                text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+        except Exception:
+            # Às vezes o conteúdo é idêntico
+            pass
 
 
 # ============= COMANDO /modelos =============
@@ -601,13 +616,21 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         msg_text += f"Conversa anterior encerrada{f' ({msg_count} mensagens)' if msg_count else ''}.\n"
         msg_text += "Me pergunte qualquer coisa! 🚀"
         
-        await update.message.reply_text(msg_text, parse_mode='Markdown')
-    except Exception:
-        await update.message.reply_text(
-            "✨ *Nova conversa iniciada!*\n\n"
-            "Me pergunte qualquer coisa! 🚀",
-            parse_mode='Markdown'
-        )
+        # Envia a resposta (compatível com comando e callback)
+        if update.callback_query:
+            # Se veio de botão, confirma o callback e manda nova mensagem
+            await update.callback_query.answer("Nova conversa iniciada!")
+            await update.effective_message.reply_text(msg_text, parse_mode='Markdown')
+        else:
+            await update.message.reply_text(msg_text, parse_mode='Markdown')
+            
+    except Exception as e:
+        logger.error(f"Erro no cmd_new: {e}")
+        fallback_text = "✨ *Nova conversa iniciada!*\n\nMe pergunte qualquer coisa! 🚀"
+        if update.callback_query:
+            await update.effective_message.reply_text(fallback_text, parse_mode='Markdown')
+        else:
+            await update.message.reply_text(fallback_text, parse_mode='Markdown')
 
 
 # ============= COMANDO /historico =============
@@ -950,15 +973,32 @@ async def cmd_library(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             
             # Feedback com emoji
             if enabled:
-                text = f"☁️ *{msg}*\n\n⚠️ Atenção: Se estiver usando VPN/Datacenter, isso pode gerar erro 403 (Token Inválido).\nSe der ruim, use `/library` de novo para desativar."
+                text = f"☁️ *{msg}* - Modo Nuvem Ativo\n\n" \
+                       f"Resetando contexto para iniciar uma nova conversa limpa na Library..."
             else:
-                text = f"🏠 *{msg}*\n\nModo seguro (Local) ativado. Conversas salvas apenas no JSON interno."
+                text = f"🏠 *{msg}* - Modo Local Ativo\n\n" \
+                       f"Conversas salvas apenas no dispositivo."
             
-            await update.message.reply_text(text, parse_mode='Markdown')
+            # Envia resposta
+            if update.callback_query:
+                await update.callback_query.answer()
+                await update.effective_message.reply_text(text, parse_mode='Markdown')
+            else:
+                await update.message.reply_text(text, parse_mode='Markdown')
+
+            # SE ATIVOU, OBRIGA O RESET (CMD_NEW)
+            if enabled:
+                # Pequeno delay visual
+                await asyncio.sleep(1)
+                await cmd_new(update, context)
             
     except Exception as e:
         logger.error(f"Erro library toggle: {e}")
-        await update.message.reply_text("❌ Erro ao alterar configuração.", parse_mode='Markdown')
+        error_text = "❌ Erro ao alterar configuração."
+        if update.callback_query:
+            await update.effective_message.reply_text(error_text)
+        else:
+            await update.message.reply_text(error_text)
 
 
 # ============= COMANDO /vpn =============
@@ -1163,13 +1203,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     user_id = update.effective_user.id
     
-    # Navegação
+    # Navegação e Menus Principais
     if data == 'back_main':
         await start(update, context)
         return
     
-    # Menus
-    if data == 'menu_modelos':
+    # Handlers do Menu Principal
+    if data == 'menu_new':
+        await cmd_new(update, context)
+    elif data == 'menu_history':
+        await cmd_historico(update, context)
+    elif data == 'menu_tokens':
+        await cmd_token(update, context)
+    elif data == 'menu_tasks':
+        await cmd_tarefas(update, context)
+    elif data == 'menu_library':
+        await cmd_library(update, context)
+        
+    # Sub-menus
+    elif data == 'menu_modelos':
         await cmd_modelos(update, context)
     elif data == 'menu_busca':
         await cmd_busca(update, context)
