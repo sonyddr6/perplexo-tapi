@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TOKENS_DIR = Path(os.getenv("TOKENS_DIR", "./data/tokens"))
 DEFAULT_COOKIES_FILE = os.getenv("PERPLEXITY_COOKIES_FILE", "cookies.json")
+DEFAULT_RAW_COOKIES_FILE = os.getenv("PERPLEXITY_RAW_COOKIES_FILE", "browser_cookies.json")
 TOKEN_ROTATION_ENABLED = os.getenv("TOKEN_ROTATION_ENABLED", "true").lower() == "true"
 
 # Cookies necessários do Perplexity
@@ -72,10 +73,52 @@ class TokenManager:
         self._env_token = os.getenv("PERPLEXITY_SESSION_TOKEN", "")
         
         # Carrega tokens
-        self._load_tokens()
+        # Carrega tokens
+        self.reload_tokens()
     
+    def _load_raw_tokens(self) -> List[Dict[str, str]]:
+        """Carrega tokens de um arquivo de exportação de cookies (array de objetos)"""
+        raw_path = self.tokens_dir / DEFAULT_RAW_COOKIES_FILE
+        if not raw_path.exists():
+            return []
+            
+        try:
+            with open(raw_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                
+            if not isinstance(data, list):
+                return []
+                
+            # Procura pelo token de sessão
+            found_tokens = []
+            for cookie in data:
+                if cookie.get('name') == "__Secure-next-auth.session-token":
+                    val = cookie.get('value')
+                    if val:
+                        found_tokens.append({
+                            "name": f"Browser Export {len(found_tokens)+1}",
+                            "session_token": val
+                        })
+            
+            if found_tokens:
+                logger.info(f"🍪 TokenManager: Carregados {len(found_tokens)} tokens via {DEFAULT_RAW_COOKIES_FILE}")
+            
+            return found_tokens
+            
+        except Exception as e:
+            logger.error(f"Erro ao ler raw cookies: {e}")
+            return []
+
+    def reload_tokens(self):
+        """Recarrega tokens do disco (alias para _load_tokens)"""
+        self._load_tokens()
+
     def _load_tokens(self):
-        """Carrega tokens do arquivo JSON ou fallback para .env"""
+        """Carrega tokens do arquivo JSON (e raw) ou fallback para .env"""
+        # 1. Carrega tokens raw (Browser Export)
+        self.accounts = self._load_raw_tokens()
+        
+        # 2. Carrega tokens estruturados (cookies.json)
         cookies_path = self.tokens_dir / self.cookies_file
         
         if cookies_path.exists():
@@ -83,28 +126,49 @@ class TokenManager:
                 with open(cookies_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 
-                self.accounts = data.get('accounts', [])
-                self.current_index = data.get('current_index', 0)
+                file_accounts = data.get('accounts', [])
+                # Mescla (append)
+                self.accounts.extend(file_accounts)
                 
-                # Garante índice válido
-                if self.current_index >= len(self.accounts):
-                    self.current_index = 0
+                # Restaura indice se valido
+                idx = data.get('current_index', 0)
+                if idx < len(self.accounts):
+                    self.current_index = idx # Nota: isso pode apontar para token errado se a lista mudou
                 
-                logger.info(f"✅ TokenManager: {len(self.accounts)} conta(s) carregada(s) de {cookies_path}")
-                
-                # Valida cada conta
-                for i, acc in enumerate(self.accounts):
-                    name = acc.get('name', f'conta_{i}')
-                    token = acc.get('session_token', '')
-                    if token and len(token) > 20:
-                        logger.info(f"   📋 {name}: token válido ({len(token)} chars)")
-                    else:
-                        logger.warning(f"   ⚠️ {name}: token inválido ou vazio")
-                
-            except json.JSONDecodeError as e:
-                logger.error(f"❌ Erro ao parsear {cookies_path}: {e}")
             except Exception as e:
-                logger.error(f"❌ Erro ao carregar tokens: {e}")
+                logger.error(f"Erro ao ler cookies.json: {e}")
+
+        # Se não tem nada, tenta env var
+        if not self.accounts:
+            if self._env_token:
+                self.accounts.append({
+                    "name": "ENV_TOKEN",
+                    "session_token": self._env_token
+                })
+        
+        # Remove duplicatas
+        unique = []
+        seen = set()
+        for acc in self.accounts:
+            t = acc.get('session_token')
+            if t and t not in seen:
+                seen.add(t)
+                unique.append(acc)
+        self.accounts = unique
+
+        # Garante índice válido
+        if self.current_index >= len(self.accounts):
+            self.current_index = 0
+            
+        logger.info(f"✅ TokenManager: Total {len(self.accounts)} conta(s) ativas.")
+        # Valida cada conta
+        for i, acc in enumerate(self.accounts):
+            name = acc.get('name', f'conta_{i}')
+            token = acc.get('session_token', '')
+            if token and len(token) > 20:
+                logger.info(f"   📋 {name}: token presente ({len(token)} chars)")
+            else:
+                logger.warning(f"   ⚠️ {name}: token inválido ou vazio")
         
         # Fallback para variável de ambiente
         if not self.accounts and self._env_token:

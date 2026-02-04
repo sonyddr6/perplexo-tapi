@@ -503,108 +503,119 @@ def search_stream():
              active_conversations[user_id] = conversation
 
         def generate():
-            # Evento inicial
-            yield f"data: {json.dumps({'status': 'Iniciando busca...'})}\n\n"
+            # Retry loop para rotação de token
+            max_retries = 3 if token_manager and len(token_manager.accounts) > 1 else 1
             
-            full_response = ""
-            citations = []
-            
-            try:
-                # Usa o modo stream do scraper
-                # Nota: A biblioteca original usa stream_ask ou ask(stream=True) retornando generator
-                # Vamos assumir que conversation.stream_ask existe ou ask suporta stream
-                
-                # Adaptação para a API da biblioteca:
-                # Se a biblioteca retornar generator de Response:
-                response_generator = None
-                
-                # Tenta usar ask(..., stream=True) se a interface for essa
-                # Analisando o código da lib (core.py): ask retorna self, e _execute popula _stream_generator se stream=True
-                # E conversation é iterável (__iter__) se _stream_generator não for None
-                
-                conversation.ask(query, stream=True)
-                
-                last_thinking = ""
-                
-                for response_step in conversation:
-                    # Extrai dados do passo
-                    raw = response_step.raw_data
-                    
-                    # 1. Status/Thinking
-                    thinking = None
-                    if raw:
-                        thinking = raw.get('thinking') or raw.get('reasoning')
-                        # Se tiver steps (Sonar)
-                        if not thinking and 'steps' in raw:
-                             steps = raw.get('steps', [])
-                             if steps:
-                                 thinking = "\\n".join([s.get('content','') for s in steps if s.get('type')=='thinking'])
+            for attempt in range(max_retries):
+                try:
+                    # Recupera (ou recria) conversa dentro do loop para garantir cliente atualizado
+                    global client
+                    if user_id in active_conversations:
+                        conversation = active_conversations[user_id]
+                    else:
+                        conversation = client.create_conversation(config)
+                        active_conversations[user_id] = conversation
 
-                    if thinking and thinking != last_thinking:
-                         # Calcula o delta ou manda tudo? Manda tudo por enquanto
-                         yield f"data: {json.dumps({'thinking': thinking})}\n\n"
-                         last_thinking = thinking
+                    # Evento inicial
+                    yield f"data: {json.dumps({'status': 'Iniciando busca...'})}\n\n"
                     
-                    # 2. Citações (sources)
-                    current_results = getattr(response_step, 'search_results', [])
-                    if len(current_results) > len(citations):
-                        # Novas citações encontradas
-                        for i in range(len(citations), len(current_results)):
-                            src = current_results[i]
-                            cit_data = {
-                                'title': getattr(src, 'title', 'Fonte'),
-                                'url': getattr(src, 'url', '')
-                            }
-                            yield f"data: {json.dumps({'citation': cit_data})}\n\n"
-                        citations = current_results
+                    full_response = ""
+                    citations = []
                     
-                    # 3. Chunk de Texto (Answer)
-                    # A biblioteca retorna o texto COMPLETO acumulado em response_step.answer
-                    # ou chunks parciais em response_step.chunks?
-                    # core.py diz: chunks = answer_data.get("chunks", [])
-                    # Vamos tentar capturar o delta do answer
-                    current_answer = response_step.answer or ""
+                    conversation.ask(query, stream=True)
                     
-                    if len(current_answer) > len(full_response):
-                        delta = current_answer[len(full_response):]
-                        if delta:
-                            yield f"data: {json.dumps({'chunk': delta})}\n\n"
-                        full_response = current_answer
+                    last_thinking = ""
+                    
+                    for response_step in conversation:
+                        # Extrai dados do passo
+                        raw = response_step.raw_data
                         
-                    # 4. Debug Canvas
-                    if 'canvas' in raw:
-                        logger.info(f"🎨 Canvas detected: {raw['canvas'].keys()}")
-                        # TODO: Emit file event
+                        # 1. Status/Thinking
+                        thinking = None
+                        if raw:
+                            thinking = raw.get('thinking') or raw.get('reasoning')
+                            # Se tiver steps (Sonar)
+                            if not thinking and 'steps' in raw:
+                                steps = raw.get('steps', [])
+                                if steps:
+                                    thinking = "\\n".join([s.get('content','') for s in steps if s.get('type')=='thinking'])
 
-                    # 5. Clarifying Questions
-                    # Alguns modelos retornam 'clarifying_question' boolean ou str
-                    # Ou 'text' é uma pergunta.
-                    # Vamos verificar se há flag explícita
-                    if raw.get('clarifying_question'):
-                        yield f"data: {json.dumps({'clarifying_question': True})}\n\n"
-                
-                # Final
-                # Final
-                final_payload = {
-                    "done": True,
-                    "answer": full_response,
-                    "citations": [{'title': getattr(c, 'title'), 'url': getattr(c, 'url')} for c in citations],
-                    "conversation_id": user_id, # ID local
-                    "backend_uuid": getattr(conversation, 'backend_uuid', None) # ID real do Perplexity
-                }
-                yield f"data: {json.dumps(final_payload)}\n\n"
-                
-                # Salva histórico
-                if user_id not in conversation_messages:
-                     conversation_messages[user_id] = []
-                conversation_messages[user_id].append({"role": "user", "content": query})
-                conversation_messages[user_id].append({"role": "assistant", "content": full_response})
-                conversation_message_counts[user_id] = conversation_message_counts.get(user_id, 0) + 1
+                        if thinking and thinking != last_thinking:
+                            yield f"data: {json.dumps({'thinking': thinking})}\n\n"
+                            last_thinking = thinking
+                        
+                        # 2. Citações (sources)
+                        current_results = getattr(response_step, 'search_results', [])
+                        if len(current_results) > len(citations):
+                            for i in range(len(citations), len(current_results)):
+                                src = current_results[i]
+                                cit_data = {
+                                    'title': getattr(src, 'title', 'Fonte'),
+                                    'url': getattr(src, 'url', '')
+                                }
+                                yield f"data: {json.dumps({'citation': cit_data})}\n\n"
+                            citations = current_results
+                        
+                        # 3. Chunk de Texto
+                        current_answer = response_step.answer or ""
+                        if len(current_answer) > len(full_response):
+                            delta = current_answer[len(full_response):]
+                            if delta:
+                                yield f"data: {json.dumps({'chunk': delta})}\n\n"
+                            full_response = current_answer
+                            
+                        # 4. Debug Canvas
+                        if 'canvas' in raw:
+                            logger.info(f"🎨 Canvas detected: {raw['canvas'].keys()}")
+                            # TODO: Emit file event
 
-            except Exception as e:
-                logger.error(f"Erro no stream: {e}")
-                error_payload = {"error": str(e)}
-                yield f"data: {json.dumps(error_payload)}\n\n"
+                        # 5. Clarifying Questions
+                        # Alguns modelos retornam 'clarifying_question' boolean ou str
+                        # Ou 'text' é uma pergunta.
+                        # Vamos verificar se há flag explícita
+                        if raw.get('clarifying_question'):
+                            yield f"data: {json.dumps({'clarifying_question': True})}\n\n"
+                            
+                    # Se chegou aqui, sucesso total
+                    # Final Payload
+                    final_payload = {
+                        "done": True,
+                        "answer": full_response,
+                        "citations": [{'title': getattr(c, 'title'), 'url': getattr(c, 'url')} for c in citations],
+                        "conversation_id": user_id,
+                        "backend_uuid": getattr(conversation, 'backend_uuid', None)
+                    }
+                    yield f"data: {json.dumps(final_payload)}\n\n"
+                    
+                    # Salva histórico
+                    if user_id not in conversation_messages:
+                        conversation_messages[user_id] = []
+                    conversation_messages[user_id].append({"role": "user", "content": query})
+                    conversation_messages[user_id].append({"role": "assistant", "content": full_response})
+                    conversation_message_counts[user_id] = conversation_message_counts.get(user_id, 0) + 1
+                    
+                    break # Break retry loop
+                    
+                except Exception as e:
+                    err_str = str(e).lower()
+                    is_auth = '401' in err_str or '403' in err_str or 'unauthorized' in err_str or 'forbidden' in err_str
+                    
+                    if is_auth and attempt < max_retries - 1:
+                        logger.warning(f"⚠️ Erro Auth (Stream). Rotacionando... ({attempt+1}/{max_retries})")
+                        yield f"data: {json.dumps({'status': '🔄 Token expirado. Trocando conta...'})}\n\n"
+                        
+                        # Rotação
+                        new_token = token_manager.get_next_token()
+                        if new_token:
+                            client_manager.init_default(new_token)
+                            client = client_manager.default_client
+                            # Força recriação da conversa na próxima iteração
+                            active_conversations.pop(user_id, None)
+                            continue
+                            
+                    logger.error(f"Erro stream final: {e}")
+                    yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                    break
 
         return app.response_class(generate(), mimetype='text/event-stream')
 
