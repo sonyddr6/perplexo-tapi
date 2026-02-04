@@ -1,0 +1,27 @@
+[
+  {
+    "domain": ".perplexity.ai",
+    "expirationDate": 1799999999,
+    "hostOnly": false,
+    "httpOnly": true,
+    "name": "__Secure-next-auth.session-token",
+    "path": "/",
+    "sameSite": "lax",
+    "secure": true,
+    "session": false,
+    "storeId": "0",
+    "value": "EXTRACTED_TOKEN_FROM_BROWSER_EXTENSION_HERE"
+  },
+  {
+    "domain": "www.perplexity.ai",
+    "hostOnly": true,
+    "httpOnly": false,
+    "name": "pplx.visitor-id",
+    "path": "/",
+    "sameSite": "unspecified",
+    "secure": false,
+    "session": false,
+    "storeId": "0",
+    "value": "visitor-id-example"
+  }
+]

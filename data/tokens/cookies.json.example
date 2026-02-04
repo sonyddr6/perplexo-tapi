@@ -1,0 +1,16 @@
+{
+    "_comment": "Template para configuração de múltiplas contas Perplexity",
+    "_instructions": "Copie este arquivo para cookies.json e adicione seus tokens",
+    "accounts": [
+        {
+            "name": "conta_principal",
+            "session_token": "COLE_SEU_SESSION_TOKEN_AQUI",
+            "_howto": "F12 → Application → Cookies → __Secure-next-auth.session-token"
+        },
+        {
+            "name": "conta_backup",
+            "session_token": "TOKEN_CONTA_2_AQUI"
+        }
+    ],
+    "current_index": 0
+}
