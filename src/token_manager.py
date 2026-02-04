@@ -38,7 +38,9 @@ logger = logging.getLogger(__name__)
 
 # ============= CONFIGURAÇÃO =============
 
-DEFAULT_TOKENS_DIR = Path(os.getenv("TOKENS_DIR", "./data/tokens"))
+# Resolve paths relative to the project root (where src/ is)
+BASE_DIR = Path(__file__).resolve().parent.parent
+DEFAULT_TOKENS_DIR = Path(os.getenv("TOKENS_DIR", BASE_DIR / "data" / "tokens"))
 DEFAULT_COOKIES_FILE = os.getenv("PERPLEXITY_COOKIES_FILE", "cookies.json")
 DEFAULT_RAW_COOKIES_FILE = os.getenv("PERPLEXITY_RAW_COOKIES_FILE", "browser_cookies.json")
 TOKEN_ROTATION_ENABLED = os.getenv("TOKEN_ROTATION_ENABLED", "true").lower() == "true"
