@@ -31,6 +31,10 @@ Thumbs.db
 
 # Dados locais (Histórico de conversas)
 data/
+!data/tokens/
+data/tokens/*
+!data/tokens/*.example
+!data/tokens/*.example
 
 # Testes locais
 test_*.py
