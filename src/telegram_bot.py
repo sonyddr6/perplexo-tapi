@@ -1587,11 +1587,232 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("❌ Erro ao ler localização.")
 
 
+# ============= COMANDO /token =============
+
+async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Gerencia tokens do Perplexity (Status, Validação, Rotação)"""
+    user_id = update.effective_user.id
+    
+    # Verifica status via MCP
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{MCP_API}/tokens")
+            status = response.json()
+    except Exception as e:
+        status = {"active": False, "error": str(e)}
+    
+    # Monta texto de status
+    active = status.get('active', False)
+    current = status.get('current_account', {})
+    total = status.get('total_accounts', 0)
+    
+    status_emoji = "🟢 Ativo" if active else "🔴 Inativo"
+    
+    text = (
+        f"🔑 *Gerenciador de Tokens*\n\n"
+        f"*Status:* {status_emoji}\n"
+        f"*Conta Atual:* `{current.get('name', 'N/A')}`\n"
+        f"*Total Contas:* {total}\n"
+        f"*Fonte:* `{current.get('source', 'N/A')}`\n\n"
+        f"_Use os botões abaixo para gerenciar:_"
+    )
+    
+    # Botões
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Validar Token", callback_data='token_validate'),
+            InlineKeyboardButton("🔄 Próximo Token", callback_data='token_rotate')
+        ],
+        [
+            InlineKeyboardButton("✨ Novo Refresh OTP", callback_data='token_new_refresh')
+        ],
+        [InlineKeyboardButton("« Voltar", callback_data='back_main')]
+    ]
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+
+
+async def token_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler para ações de token"""
+    query = update.callback_query
+    data = query.data
+    
+    if data == 'token_validate':
+        await query.answer("Validando token...")
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(f"{MCP_API}/tokens/validate")
+                result = response.json()
+            
+            is_valid = result.get('valid', False)
+            msg = "✅ Token Válido!" if is_valid else "❌ Token Inválido/Expirado!"
+            account = result.get('account', {}).get('name', 'N/A')
+            
+            await query.edit_message_text(
+                f"{msg}\n\nConta: `{account}`",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Voltar", callback_data='token_menu')]]),
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            await query.edit_message_text(f"Erro: {e}")
+
+    elif data == 'token_rotate':
+        await query.answer("Rotacionando...")
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.post(f"{MCP_API}/tokens/rotate")
+                result = response.json()
+            
+            new_acc = result.get('current_account', {}).get('name')
+            
+            if result.get('rotated'):
+                await query.edit_message_text(
+                    f"🔄 *Token Rotacionado!*\n\nNova conta: `{new_acc}`",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Voltar", callback_data='token_menu')]]),
+                    parse_mode='Markdown'
+                )
+            else:
+                 # Se não rodou, provavelmente só tem 1 conta
+                total = result.get('current_account', {}).get('total_accounts', 1)
+                if total > 1:
+                     msg = "Falha na rotação."
+                else:
+                     msg = "ℹ️ Apenas uma conta cadastrada. Rotação não necessária."
+                
+                await query.answer(msg, show_alert=True)
+                
+        except Exception as e:
+            await query.answer(f"Erro: {e}", show_alert=True)
+
+    elif data == 'token_new_refresh':
+        # Inicia fluxo de refresh OTP via Telegram
+        await query.edit_message_text(
+            "📧 *Novo Refresh Token*\n\n"
+            "Envie seu email do Perplexity para iniciar.\n"
+            "Ex: `user@email.com`\n\n"
+            "_Digite /cancelar para abortar._",
+            parse_mode='Markdown'
+        )
+        context.user_data['waiting_for_email'] = True
+
+    elif data == 'token_menu':
+        await cmd_token(update, context)
+
+
+# ============= COMANDO /cancelar =============
+
+async def cmd_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Cancela operações de token em andamento"""
+    if context.user_data.get('waiting_for_email') or context.user_data.get('waiting_for_otp'):
+        context.user_data['waiting_for_email'] = False
+        context.user_data['waiting_for_otp'] = False
+        context.user_data['refresh_email'] = None
+        await update.message.reply_text("🚫 Operação cancelada. Estado limpo.")
+    else:
+        await update.message.reply_text("Nada para cancelar.")
+
+
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Processa mensagens de texto (e arquivos pendentes se houver)"""
     user_id = update.effective_user.id
     user_query = update.message.text
+    text = user_query
     config = get_user_config(user_id)
+    
+    # ---------------------------------------------------------
+    # FLUXO DE REFRESH TOKEN (EMAIL/OTP)
+    # ---------------------------------------------------------
+    
+    # Nota: Comandos como /cancelar são tratados pelos seus próprios handlers
+    # porque este handler usa filtro ~filters.COMMAND no main().
+
+    # Verifica explicitamente se é True (não None ou False)
+    if context.user_data.get('waiting_for_email') is True:
+        email = text.strip()
+        # Validação simples de email
+        if '@' not in email or '.' not in email:
+            await update.message.reply_text("❌ Email inválido. Tente novamente ou use /cancelar.")
+            return
+
+        msg = await update.message.reply_text("🔄 Enviando código de verificação... (isso pode levar alguns segundos)")
+        
+        try:
+            # Chama script de refresh (send-only)
+            import subprocess
+            # Usa sys.executable para garantir que usa o mesmo python
+            cmd = [sys.executable, "scripts/refresh_token.py", "--email", email, "--send-only"]
+            
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await proc.communicate()
+            
+            if proc.returncode == 0:
+                await msg.edit_text(
+                    f"✅ Código enviado para `{email}`!\n\n"
+                    "📬 Verifique seu email e digite o código OTP (6 dígitos) ou cole o Magic Link aqui:",
+                    parse_mode='Markdown'
+                )
+                context.user_data['waiting_for_email'] = False
+                context.user_data['waiting_for_otp'] = True
+                context.user_data['refresh_email'] = email
+            else:
+                err_msg = stderr.decode()
+                logger.error(f"Erro refresh send: {err_msg}")
+                await msg.edit_text(f"❌ Erro ao enviar código. Verifique se o email está correto.\n\n_Erro: {err_msg.splitlines()[-1] if err_msg else 'Desconhecido'}_", parse_mode='Markdown')
+        except Exception as e:
+            await msg.edit_text(f"❌ Erro interno: {e}")
+        return
+
+    if context.user_data.get('waiting_for_otp') is True:
+        otp = text.strip()
+        email = context.user_data.get('refresh_email')
+        
+        msg = await update.message.reply_text("🔐 Validando código e gerando token...")
+        
+        try:
+            # Chama script para validar e salvar
+            import subprocess
+            cmd = [sys.executable, "scripts/refresh_token.py", "--email", email, "--otp", otp]
+            
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await proc.communicate()
+            
+            if proc.returncode == 0:
+                await msg.edit_text(
+                    "✅ *Token Gerado com Sucesso!*\n"
+                    "O novo token foi salvo e já está ativo no sistema.\n\n"
+                    "Use `/token` para verificar o status.",
+                    parse_mode='Markdown'
+                )
+            else:
+                err_msg = stderr.decode()
+                logger.error(f"Erro refresh otp: {err_msg}")
+                await msg.edit_text(f"❌ Código inválido ou erro na validação.\n\n_Erro: {err_msg.splitlines()[-1] if err_msg else 'Desconhecido'}_", parse_mode='Markdown')
+        except Exception as e:
+            await msg.edit_text(f"❌ Erro interno: {e}")
+        
+        context.user_data['waiting_for_otp'] = False
+        return
+    # ---------------------------------------------------------
+
     
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
@@ -1886,6 +2107,7 @@ def main() -> None:
     app.add_handler(CommandHandler("library", cmd_library))
     app.add_handler(CommandHandler("vpn", cmd_vpn))
     app.add_handler(CommandHandler("token", cmd_token))
+    app.add_handler(CommandHandler("cancelar", cmd_cancelar))
 
     app.add_handler(CommandHandler("historico", cmd_historico))
     app.add_handler(CommandHandler("teste", cmd_teste))
@@ -1897,6 +2119,7 @@ def main() -> None:
     app.add_handler(CommandHandler("ajuda", cmd_ajuda))
     
     # Callbacks (botões inline)
+    app.add_handler(CallbackQueryHandler(token_callback_handler, pattern="^token_"))
     app.add_handler(CallbackQueryHandler(button_handler))
     
     # Mensagens

@@ -57,6 +57,16 @@ limiter = Limiter(
 PERPLEXITY_SESSION_TOKEN = os.getenv("PERPLEXITY_SESSION_TOKEN", "")
 MCP_PORT = int(os.getenv("MCP_PORT", 5000))
 
+# ============= TOKEN MANAGER =============
+from token_manager import get_token_manager, TokenManager
+
+try:
+    token_manager = get_token_manager()
+    logger.info(f"🔑 TokenManager inicializado: {len(token_manager.accounts)} conta(s)")
+except Exception as e:
+    logger.warning(f"⚠️ TokenManager não disponível: {e}")
+    token_manager = None
+
 # ============= IMPORTAÇÃO DO SCRAPER REAL =============
 
 SCRAPER_AVAILABLE = False
@@ -169,9 +179,21 @@ class ClientManager:
         return self.default_client
 
 client_manager = ClientManager()
-if PERPLEXITY_SESSION_TOKEN:
+
+# Inicializa cliente usando TokenManager (prioridade) ou fallback .env
+if token_manager and token_manager.accounts:
+    # Usa token do TokenManager
+    current_token = token_manager.get_current_token()
+    if current_token:
+        client_manager.init_default(current_token)
+        account_info = token_manager.get_account_info()
+        logger.info(f"🔑 Usando token do TokenManager: {account_info.get('name', 'unknown')}")
+elif PERPLEXITY_SESSION_TOKEN:
+    # Fallback para variável de ambiente
     client_manager.init_default(PERPLEXITY_SESSION_TOKEN)
-    client = client_manager.default_client # Fallback compatibility
+    logger.info("📌 Usando PERPLEXITY_SESSION_TOKEN do .env")
+
+client = client_manager.default_client  # Fallback compatibility
 
 # ============= STORAGE DE CONVERSAS ATIVAS =============
 # Mantém uma conversa ativa por usuário para histórico nativo
@@ -377,8 +399,59 @@ def health_check():
         "scraper_available": SCRAPER_AVAILABLE,
         "client_initialized": client is not None,
         "source_focus_available": SourceFocus is not None,
+        "token_manager_active": token_manager is not None and len(token_manager.accounts) > 0,
         "active_conversations": len(active_conversations),
-        "version": "2.3.0"
+        "version": "2.4.0"
+    })
+
+
+@app.route('/tokens', methods=['GET'])
+@app.route('/tokens/status', methods=['GET'])
+def tokens_status():
+    """Retorna status do TokenManager"""
+    if token_manager is None:
+        return jsonify({
+            "active": False,
+            "message": "TokenManager não disponível",
+            "fallback": "PERPLEXITY_SESSION_TOKEN" if PERPLEXITY_SESSION_TOKEN else None
+        })
+    
+    return jsonify(token_manager.get_status())
+
+
+@app.route('/tokens/rotate', methods=['POST'])
+def tokens_rotate():
+    """Rotaciona para próximo token manualmente"""
+    if token_manager is None or len(token_manager.accounts) < 2:
+        return jsonify({"error": "Rotação não disponível"}), 400
+    
+    old_index = token_manager.current_index
+    new_token = token_manager.get_next_token()
+    
+    # Reinicializa cliente com novo token
+    if new_token:
+        client_manager.init_default(new_token)
+        global client
+        client = client_manager.default_client
+    
+    return jsonify({
+        "rotated": True,
+        "old_index": old_index,
+        "new_index": token_manager.current_index,
+        "current_account": token_manager.get_account_info()
+    })
+
+
+@app.route('/tokens/validate', methods=['POST'])
+def tokens_validate():
+    """Valida o token atual"""
+    if token_manager is None:
+        return jsonify({"error": "TokenManager não disponível"}), 400
+    
+    is_valid = token_manager.validate_token()
+    return jsonify({
+        "valid": is_valid,
+        "account": token_manager.get_account_info()
     })
 
 
