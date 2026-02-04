@@ -276,6 +276,153 @@ class TokenManager:
             logger.error(f"❌ Erro ao validar token: {e}")
             return False
     
+    def refresh_from_browser_cookies(self) -> Dict[str, Any]:
+        """
+        Tenta obter um novo token usando todos os cookies do browser_cookies.json.
+        Simula o comportamento de abrir uma nova aba no navegador.
+        
+        Returns:
+            Dict com 'success', 'new_token', 'old_token', 'message'
+        """
+        result = {
+            "success": False,
+            "new_token": None,
+            "old_token": None,
+            "message": ""
+        }
+        
+        # 1. Carregar todos os cookies do browser_cookies.json
+        raw_path = self.tokens_dir / DEFAULT_RAW_COOKIES_FILE
+        if not raw_path.exists():
+            result["message"] = f"Arquivo {DEFAULT_RAW_COOKIES_FILE} não encontrado"
+            logger.warning(f"⚠️ {result['message']}")
+            return result
+        
+        try:
+            with open(raw_path, 'r', encoding='utf-8') as f:
+                raw_cookies = json.load(f)
+        except Exception as e:
+            result["message"] = f"Erro ao ler {DEFAULT_RAW_COOKIES_FILE}: {e}"
+            logger.error(f"❌ {result['message']}")
+            return result
+        
+        if not isinstance(raw_cookies, list):
+            result["message"] = "Formato inválido: esperado array de cookies"
+            return result
+        
+        # 2. Converter para dicionário
+        all_cookies = {}
+        for cookie in raw_cookies:
+            name = cookie.get('name')
+            value = cookie.get('value')
+            if name and value:
+                all_cookies[name] = value
+        
+        result["old_token"] = all_cookies.get("__Secure-next-auth.session-token", "")[:50] + "..."
+        
+        if not all_cookies.get("__Secure-next-auth.session-token"):
+            result["message"] = "Session token não encontrado nos cookies"
+            return result
+        
+        logger.info(f"🍪 Carregados {len(all_cookies)} cookies do browser")
+        
+        # 3. Fazer requisição para /api/auth/session
+        try:
+            from curl_cffi import requests as cffi_requests
+        except ImportError:
+            result["message"] = "curl_cffi não instalado (pip install curl-cffi)"
+            return result
+        
+        headers = {
+            "Accept": "*/*",
+            "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Referer": "https://www.perplexity.ai/",
+            "sec-ch-ua": '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+            "x-app-apiclient": "default",
+            "x-app-apiversion": "2.18"
+        }
+        
+        try:
+            response = cffi_requests.get(
+                "https://www.perplexity.ai/api/auth/session?version=2.18&source=default",
+                headers=headers,
+                cookies=all_cookies,
+                impersonate="chrome",
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                # Verificar se retornou novo token
+                new_token = None
+                if hasattr(response, 'cookies'):
+                    new_token = response.cookies.get("__Secure-next-auth.session-token")
+                
+                if new_token:
+                    result["new_token"] = new_token
+                    result["success"] = True
+                    
+                    # Salvar o novo token
+                    self._save_refreshed_token(new_token)
+                    
+                    # Recarregar tokens
+                    self.reload_tokens()
+                    
+                    result["message"] = "Token renovado com sucesso!"
+                    logger.info(f"🎉 Token renovado! Novo: {new_token[:30]}...")
+                else:
+                    result["message"] = "Servidor não retornou novo token (token atual ainda válido)"
+                    result["success"] = True  # Não é erro, só não rotacionou
+                    
+            elif response.status_code == 403:
+                result["message"] = "Cloudflare bloqueou (403). Cookies podem estar expirados."
+            elif response.status_code == 401:
+                result["message"] = "Token expirado ou inválido (401)"
+            else:
+                result["message"] = f"Status inesperado: {response.status_code}"
+                
+        except Exception as e:
+            result["message"] = f"Erro na requisição: {e}"
+            logger.error(f"❌ {result['message']}")
+        
+        return result
+    
+    def _save_refreshed_token(self, token: str):
+        """Salva token renovado no cookies.json"""
+        cookies_path = self.tokens_dir / self.cookies_file
+        
+        try:
+            if cookies_path.exists():
+                with open(cookies_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            else:
+                data = {"accounts": [], "current_index": 0}
+            
+            new_account = {
+                "name": "auto_refreshed",
+                "session_token": token,
+                "refreshed_at": datetime.now().isoformat(),
+                "source": "browser_refresh"
+            }
+            
+            # Remove refresh anterior se existir
+            data['accounts'] = [a for a in data['accounts'] if a.get('name') != 'auto_refreshed']
+            data['accounts'].insert(0, new_account)  # Coloca no início
+            data['current_index'] = 0
+            data['updated_at'] = datetime.now().isoformat()
+            
+            with open(cookies_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"💾 Token salvo em {cookies_path}")
+            
+        except Exception as e:
+            logger.error(f"❌ Erro ao salvar token renovado: {e}")
+    
     def add_account(self, name: str, session_token: str, validate: bool = True) -> bool:
         """Adiciona uma nova conta ao gerenciador"""
         if validate and not self.validate_token(session_token):

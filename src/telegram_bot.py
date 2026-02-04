@@ -1753,6 +1753,9 @@ async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             InlineKeyboardButton("🔄 Próximo Token", callback_data='token_rotate')
         ],
         [
+            InlineKeyboardButton("🚀 Smart Refresh (Cookies)", callback_data='token_refresh')
+        ],
+        [
             InlineKeyboardButton("✨ Novo Refresh OTP", callback_data='token_new_refresh')
         ],
         [InlineKeyboardButton("« Voltar", callback_data='back_main')]
@@ -1799,30 +1802,54 @@ async def token_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif data == 'token_rotate':
         await query.answer("Rotacionando...")
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(f"{MCP_API}/tokens/rotate")
                 result = response.json()
             
-            new_acc = result.get('current_account', {}).get('name')
+            msg = result.get('message', 'Indefinido')
+            await query.answer(f"✅ {msg}")
             
-            if result.get('rotated'):
-                await query.edit_message_text(
-                    f"🔄 *Token Rotacionado!*\n\nNova conta: `{new_acc}`",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Voltar", callback_data='token_menu')]]),
-                    parse_mode='Markdown'
+            # Recarrega menu
+            await cmd_token(update, context)
+        except Exception as e:
+            await query.edit_message_text(f"Erro: {e}")
+
+    elif data == 'token_refresh':
+        await query.answer("Iniciando Smart Refresh...")
+        # Mensagem temporária de processamento
+        await query.edit_message_text(
+            "⏳ *Processando Smart Refresh...*\n\n"
+            "_Isso simula um navegador abrindo uma nova aba e extraindo cookies atualizados do servidor._",
+            parse_mode='Markdown'
+        )
+        
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                response = await client.get(f"{MCP_API}/tokens/refresh")
+                result = response.json()
+            
+            if result.get('status') == 'success':
+                text = (
+                    f"✅ *Token Renovado com Sucesso!*\n\n"
+                    f"📝 *Status:* {result.get('message')}\n"
+                    f"🔑 *Preview:* `{result.get('new_token_preview')}`\n\n"
+                    f"_O bot já está usando o novo token!_"
                 )
             else:
-                 # Se não rodou, provavelmente só tem 1 conta
-                total = result.get('current_account', {}).get('total_accounts', 1)
-                if total > 1:
-                     msg = "Falha na rotação."
-                else:
-                     msg = "ℹ️ Apenas uma conta cadastrada. Rotação não necessária."
-                
-                await query.answer(msg, show_alert=True)
-                
+                text = (
+                    f"❌ *Erro no Refresh*\n\n"
+                    f"📝 *Mensagem:* {result.get('message')}\n\n"
+                    f"Tente exportar os cookies do navegador novamente se o erro persistir."
+                )
+            
+            await query.edit_message_text(
+                text,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Voltar", callback_data='token_menu')]]),
+                parse_mode='Markdown'
+            )
         except Exception as e:
-            await query.answer(f"Erro: {e}", show_alert=True)
+            logger.error(f"Erro no callback token_refresh: {e}")
+            await query.edit_message_text(f"❌ Erro de conexão com o MCP: {e}")
 
     elif data == 'token_new_refresh':
         # Inicia fluxo de refresh OTP via Telegram

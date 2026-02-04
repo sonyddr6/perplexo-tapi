@@ -454,6 +454,47 @@ def tokens_validate():
         "account": token_manager.get_account_info()
     })
 
+# Valida o token atual
+@app.route('/tokens/validate', methods=['GET'])
+def tokens_validate_get(): # Renamed to avoid conflict with POST route
+    if not token_manager:
+        return jsonify({"error": "TokenManager não disponível"}), 503
+    
+    is_valid = token_manager.validate_token()
+    return jsonify({
+        "valid": is_valid,
+        "token_preview": token_manager.get_current_token()[:15] + "..." if token_manager.get_current_token() else None
+    })
+
+# Renovação inteligente de token via browser_cookies.json
+@app.route('/tokens/refresh', methods=['POST', 'GET'])
+@limiter.limit("5 per minute")
+def tokens_refresh():
+    """Tenta renovar o token usando todos os cookies do browser"""
+    if not token_manager:
+        return jsonify({"error": "TokenManager não disponível"}), 503
+    
+    logger.info("🔄 Iniciando renovação de token via API...")
+    result = token_manager.refresh_from_browser_cookies()
+    
+    if result["success"]:
+        # Se renovou com sucesso, reinicializa o cliente default com o novo token
+        new_token = token_manager.get_current_token()
+        if new_token:
+            client_manager.init_default(new_token)
+            logger.info("✅ Cliente reinicializado com novo token!")
+        
+        return jsonify({
+            "status": "success",
+            "message": result["message"],
+            "new_token_preview": result["new_token"][:15] + "..." if result["new_token"] else "N/A"
+        })
+    else:
+        return jsonify({
+            "status": "error",
+            "message": result["message"]
+        }), 400
+
 
 @app.route('/search_stream', methods=['POST'])
 @limiter.limit("20 per minute")
