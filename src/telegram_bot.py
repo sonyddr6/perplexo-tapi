@@ -190,10 +190,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ],
         [
             InlineKeyboardButton("🔑 Tokens", callback_data='menu_tokens'),
-            InlineKeyboardButton("📅 Tarefas", callback_data='menu_tasks'),
+            InlineKeyboardButton("🔒 VPN", callback_data='menu_vpn'),
             InlineKeyboardButton("☁️ Library", callback_data='menu_library')
         ],
         [
+            InlineKeyboardButton("📅 Tarefas", callback_data='menu_tasks'),
             InlineKeyboardButton("⚙️ Config", callback_data='menu_config'),
             InlineKeyboardButton("❓ Ajuda", callback_data='menu_ajuda')
         ]
@@ -639,6 +640,18 @@ async def cmd_historico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """Lista conversas salvas"""
     user_id = update.effective_user.id
     
+    # Prepara envio (suporta message e callback)
+    if update.callback_query:
+        await update.callback_query.answer()
+        # Edita ou envia nova msg? Melhor enviar nova para histórico não sumir rápido
+        # Mas para menu, editar é mais fluido. O usuário decide com "voltar".
+        # Vamos editar para ficar clean.
+        reply_method = update.callback_query.edit_message_text
+        reply_attr = {} # edit_message não aceita reply_to_message_id
+    else:
+        reply_method = update.message.reply_text
+        reply_attr = {}
+
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(f"{MCP_API}/history/list", params={"user_id": str(user_id)})
@@ -647,11 +660,14 @@ async def cmd_historico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         conversations = data.get('conversations', [])
         
         if not conversations:
-            await update.message.reply_text(
+            text = (
                 "📂 *Seu histórico está vazio.*\n\n"
-                "Use `/new` para criar novas conversas e elas serão salvas automaticamente ao limpar.",
-                parse_mode='Markdown'
+                "Use `/new` para criar novas conversas e elas serão salvas automaticamente ao limpar."
             )
+            # Se for callback, pode ter botão "voltar"
+            kb = [[InlineKeyboardButton("« Voltar", callback_data='back_main')]] if update.callback_query else []
+            
+            await reply_method(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
             return
         
         keyboard = []
@@ -680,9 +696,9 @@ async def cmd_historico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 callback_data=f'load_history_{conv_id}'
             )])
             
-        keyboard.append([InlineKeyboardButton("« Cancelar", callback_data='back_main')])
+        keyboard.append([InlineKeyboardButton("« Voltar", callback_data='back_main')])
         
-        await update.message.reply_text(
+        await reply_method(
             text,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
@@ -690,7 +706,8 @@ async def cmd_historico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         
     except Exception as e:
         logger.error(f"Erro ao listar histórico: {e}")
-        await update.message.reply_text("❌ Erro ao buscar histórico.", parse_mode='Markdown')
+        err_text = "❌ Erro ao buscar histórico."
+        await reply_method(err_text, parse_mode='Markdown')
 
 
 
@@ -837,20 +854,30 @@ async def cmd_tarefas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user_id = update.effective_user.id
     tm = get_task_manager()
     
+    # Prepara envio (suporta message e callback)
+    if update.callback_query:
+        await update.callback_query.answer()
+        reply_method = update.callback_query.edit_message_text
+    else:
+        reply_method = update.message.reply_text
+
     if not tm:
-        await update.message.reply_text("❌ Gerenciador de tarefas não disponível.")
+        await reply_method("❌ Gerenciador de tarefas não disponível.")
         return
     
     tasks = tm.get_tasks(user_id)
     
+    # Botão voltar sempre bom
+    kb_back = [[InlineKeyboardButton("🔙 Voltar", callback_data='back_main')]]
+    
     if not tasks:
-        await update.message.reply_text(
+        text = (
             "📋 *Suas Tarefas*\n\n"
             "_Você não tem tarefas agendadas._\n\n"
             "Peça ao bot para criar uma tarefa, exemplo:\n"
-            '"Crie uma tarefa para me avisar o preço do Bitcoin todo dia às 9h"',
-            parse_mode='Markdown'
+            '"Crie uma tarefa para me avisar o preço do Bitcoin todo dia às 9h"'
         )
+        await reply_method(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb_back))
         return
     
     text = "📋 *Suas Tarefas Ativas:*\n\n"
@@ -868,10 +895,12 @@ async def cmd_tarefas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             InlineKeyboardButton(f"🗑️ {task.name[:15]}", callback_data=f"task_delete_{task.task_id}")
         ])
     
-    await update.message.reply_text(
+    keyboard.append([InlineKeyboardButton("🔙 Voltar", callback_data='back_main')])
+    
+    await reply_method(
         text,
         parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
@@ -1005,8 +1034,16 @@ async def cmd_library(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def cmd_vpn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Controle da VPN: status, ativar/desativar, reconectar"""
-    msg = await update.message.reply_text("🔄 *Verificando VPN...*", parse_mode='Markdown')
     
+    # Suporte a callback
+    if update.callback_query:
+        await update.callback_query.answer()
+        reply_method = update.callback_query.edit_message_text
+        msg = update.effective_message # Para editar depois se precisar interagir
+    else:
+        msg = await update.message.reply_text("🔄 *Verificando VPN...*", parse_mode='Markdown')
+        reply_method = msg.edit_text
+
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             # Obtém status atual
@@ -1038,7 +1075,7 @@ async def cmd_vpn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         # Monta mensagem
         text = (
-            f"🔐 *Controle VPN*\n\n"
+            f"🔐 *Controle VPN* (VPS)\n\n"
             f"{status_emoji} *Status:* {status_text}\n"
             f"🌐 *IP Público:* `{public_ip}`\n\n"
             f"Selecione uma ação:"
@@ -1058,11 +1095,11 @@ async def cmd_vpn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         buttons.append([InlineKeyboardButton("🔙 Voltar", callback_data="back_main")])
         
-        await msg.edit_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
+        await reply_method(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
         
     except Exception as e:
         logger.error(f"Erro cmd_vpn: {e}")
-        await msg.edit_text(f"❌ Erro ao verificar VPN: {e}", parse_mode='Markdown')
+        await reply_method(f"❌ Erro ao verificar VPN: {e}", parse_mode='Markdown')
 
 
 async def handle_vpn_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -1109,37 +1146,75 @@ async def handle_vpn_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # ============= COMANDO /token =============
 async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Atualiza o Token de Sessão Dinamicamente"""
-    user_id = update.effective_user.id
+    """Gerenciador de Tokens (Dashboard)"""
     
-    if not context.args:
-        await update.message.reply_text("⚠️ Use: `/token <seu_novo_token_aqui>`")
+    # Suporte a callback
+    if update.callback_query:
+        await update.callback_query.answer()
+        reply_method = update.callback_query.edit_message_text
+    else:
+        msg = await update.message.reply_text("🔄 *Carregando painel de tokens...*", parse_mode='Markdown')
+        reply_method = msg.edit_text
+
+    # Se usuário passou argumento: /token <sess> (Modo Manual)
+    if context.args:
+        token = context.args[0]
+        try:
+            await update.message.delete()
+        except: pass
+        
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(f"{MCP_API}/config/token", json={"token": token})
+                if resp.status_code == 200:
+                    await reply_method("✅ *Token Inserido Manualmente!*", parse_mode='Markdown')
+                else:
+                    await reply_method(f"❌ Erro: {resp.text}", parse_mode='Markdown')
+        except Exception as e:
+            await reply_method(f"❌ Erro de conexão: {e}", parse_mode='Markdown')
         return
-        
-    token = context.args[0]
-    
-    # Tenta apagar a mensagem do usuário por segurança
-    try:
-        await update.message.delete()
-    except:
-        pass # Pode não ter permissão
-        
-    msg = await update.message.reply_text("🔑 *Atualizando Token...*", parse_mode='Markdown')
-    
+
+    # Modo Dashboard
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(f"{MCP_API}/config/token", json={"token": token})
+            status_resp = await client.get(f"{MCP_API}/tokens/status")
+            try:
+                status = status_resp.json()
+            except:
+                status = {}
             
-            if response.status_code == 200:
-                await msg.edit_text("✅ *Token Atualizado com Sucesso!*\nExecutando diagnóstico automático...", parse_mode='Markdown')
-                # Chama o diagnóstico
-                await cmd_teste(update, context)
-            else:
-                await msg.edit_text(f"❌ Erro ao atualizar: {response.text}", parse_mode='Markdown')
-                
+        current = status.get('current_account', {})
+        total = status.get('total_accounts', 0)
+        idx = status.get('current_index', 0) + 1
+        is_active = status.get('active', False)
+        
+        status_emoji = "🟢" if is_active else "🔴"
+        
+        text = (
+            f"🔑 *Gestão de Tokens* {status_emoji}\n\n"
+            f"👤 *Conta:* `{current.get('email', 'N/A')}`\n"
+            f"🏷️ *Nome:* {current.get('name', 'N/A')}\n"
+            f"🔢 *Índice:* {idx}/{total}\n"
+            f"📅 *Validade:* {current.get('expires', 'Desconhecida')}\n\n"
+            f"_Selecione uma ação:_"
+        )
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Validar", callback_data='token_validate'),
+                InlineKeyboardButton("🔄 Rotação (Next)", callback_data='token_rotate')
+            ],
+            [
+                InlineKeyboardButton("🆕 Novo Refresh OTP", callback_data='token_new_refresh')
+            ],
+            [InlineKeyboardButton("🔙 Voltar", callback_data='back_main')]
+        ]
+        
+        await reply_method(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+        
     except Exception as e:
-        logger.error(f"Erro token update: {e}")
-        await msg.edit_text("❌ Erro de conexão com MCP.", parse_mode='Markdown')
+        logger.error(f"Erro cmd_token: {e}")
+        await reply_method(f"❌ Erro ao carregar painel: {e}", parse_mode='Markdown')
 
 
 # ============= COMANDO /teste =============
@@ -1219,6 +1294,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await cmd_tarefas(update, context)
     elif data == 'menu_library':
         await cmd_library(update, context)
+    elif data == 'menu_vpn':
+        await cmd_vpn(update, context)
         
     # Sub-menus
     elif data == 'menu_modelos':
