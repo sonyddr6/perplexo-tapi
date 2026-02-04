@@ -53,6 +53,8 @@ services:
       - TELEGRAM_PORT=8000
       - MCP_API_URL=http://127.0.0.1:5000
     volumes:
+      - ./src:/app/src
+      - ./data:/app/data
       - ./logs:/app/logs
       - ./config:/app/config
       - ./auth_info_baileys:/app/auth_info_baileys
