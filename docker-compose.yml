@@ -16,7 +16,7 @@ services:
       # NordVPN Config
       - VPN_SERVICE_PROVIDER=nordvpn
       - VPN_TYPE=openvpn
-      - OPENVPN_USER=${OPENVPUN_USER}
+      - OPENVPN_USER=${OPENVPN_USER}
       - OPENVPN_PASSWORD=${OPENVPN_PASSWORD}
       # Servidor Brasil
       - SERVER_COUNTRIES=Brazil
