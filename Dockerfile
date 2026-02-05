@@ -21,8 +21,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Instala o scraper do Perplexity
 RUN pip install --no-cache-dir git+https://github.com/henrique-coder/perplexity-webui-scraper
 
-# Cria diretórios necessários
-RUN mkdir -p /app/logs /app/config /app/auth_info_baileys /app/data/tokens /app/data/conversations /app/data/tasks
+# ✅ CORRIGIDO: Cria TODOS os diretórios necessários
+RUN mkdir -p \
+    /app/logs \
+    /app/config \
+    /app/auth_info_baileys \
+    /app/data/tokens \
+    /app/data/conversations \
+    /app/data/tasks
 
 # Copia código fonte
 COPY src/ ./src/
@@ -30,14 +36,15 @@ COPY src/ ./src/
 # Copia scripts de refresh
 COPY scripts/ ./scripts/
 
-# Copia arquivos de dados (tokens e cookies)
-COPY data/ ./data/
+# ✅ CORRIGIDO: Copia arquivos de dados (tokens e cookies) se existirem
+COPY data/ ./data/ 2>/dev/null || true
 
 # Variáveis de ambiente
 ENV PYTHONUNBUFFERED=1
 ENV FLASK_ENV=production
 ENV MCP_PORT=5000
 ENV TELEGRAM_PORT=8000
+ENV TOKENS_DIR=/app/data/tokens
 
 # Expõe portas
 EXPOSE 5000 8000
