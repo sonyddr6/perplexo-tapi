@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Instala o scraper do Perplexity
 RUN pip install --no-cache-dir git+https://github.com/henrique-coder/perplexity-webui-scraper
 
-# ✅ CORRIGIDO: Cria TODOS os diretórios necessários
+# ✅ Cria TODOS os diretórios necessários
 RUN mkdir -p \
     /app/logs \
     /app/config \
@@ -36,8 +36,8 @@ COPY src/ ./src/
 # Copia scripts de refresh
 COPY scripts/ ./scripts/
 
-# ✅ CORRIGIDO: Copia arquivos de dados (tokens e cookies) se existirem
-COPY data/ ./data/ 2>/dev/null || true
+# ✅ CORRIGIDO: Copia arquivos de dados (SEM fallback silencioso)
+COPY data/tokens/ ./data/tokens/
 
 # Variáveis de ambiente
 ENV PYTHONUNBUFFERED=1
