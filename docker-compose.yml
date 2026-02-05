@@ -53,6 +53,7 @@ services:
       - TELEGRAM_PORT=8000
       - MCP_API_URL=http://127.0.0.1:5000
       - FLASK_ENV=production
+      - TOKENS_DIR=/app/data/tokens
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
