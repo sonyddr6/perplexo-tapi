@@ -16,7 +16,7 @@ services:
       # NordVPN Config
       - VPN_SERVICE_PROVIDER=nordvpn
       - VPN_TYPE=openvpn
-      - OPENVPN_USER=${OPENVPN_USER}
+      - OPENVPN_USER=${OPENVPUN_USER}
       - OPENVPN_PASSWORD=${OPENVPN_PASSWORD}
       # Servidor Brasil
       - SERVER_COUNTRIES=Brazil
@@ -54,8 +54,11 @@ services:
       - MCP_API_URL=http://127.0.0.1:5000
       - FLASK_ENV=production
     volumes:
+      - ./src:/app/src
+      - ./data:/app/data
       - ./logs:/app/logs
       - ./config:/app/config
+      - ./scripts:/app/scripts
       - ./auth_info_baileys:/app/auth_info_baileys
 
   # ========== Node.js: WhatsApp Bot (opcional) ==========
