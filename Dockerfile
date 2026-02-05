@@ -22,13 +22,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir git+https://github.com/henrique-coder/perplexity-webui-scraper
 
 # Cria diretórios necessários
-RUN mkdir -p /app/logs /app/config /app/auth_info_baileys
+RUN mkdir -p /app/logs /app/config /app/auth_info_baileys /app/data/tokens /app/data/conversations /app/data/tasks
 
 # Copia código fonte
 COPY src/ ./src/
 
-# O diretório config será mapeado via volume no docker-compose.yml
-# Não precisa copiar aqui
+# Copia scripts de refresh
+COPY scripts/ ./scripts/
+
+# Copia arquivos de dados (tokens e cookies)
+COPY data/ ./data/
 
 # Variáveis de ambiente
 ENV PYTHONUNBUFFERED=1
