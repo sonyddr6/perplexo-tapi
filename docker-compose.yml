@@ -54,7 +54,7 @@ services:
       - MCP_API_URL=http://127.0.0.1:5000
       - FLASK_ENV=production
     volumes:
-      - ./src:/app/src
+      # NÃO incluir ./src:/app/src em produção!
       - ./data:/app/data
       - ./logs:/app/logs
       - ./config:/app/config
