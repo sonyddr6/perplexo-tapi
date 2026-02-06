@@ -43,6 +43,8 @@ const MODELS = {
     'deep-research': '📊 Deep Research',
     'gpt-5.2': '🧠 GPT-5.2 (OpenAI)',
     'gpt-5.2-thinking': '🧠💭 GPT-5.2 Thinking',
+    'claude-4.6-opus': '🎭🆕 Claude 4.6 Opus (NOVO!)',
+    'claude-4.6-opus-thinking': '🎭💭 Claude 4.6 Think (NOVO!)',
     'claude-4.5-sonnet': '🎭 Claude Sonnet',
     'claude-4.5-opus': '🎭✨ Claude Opus',
     'gemini-3-flash': '💎 Gemini Flash',

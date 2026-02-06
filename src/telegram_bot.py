@@ -120,6 +120,8 @@ MODELS = [
     ('deep-research', '📊 Deep Research', 'Pesquisa profunda'),
     ('gpt-5.2', '🧠 GPT-5.2', 'OpenAI'),
     ('gpt-5.2-thinking', '🧠💭 GPT-5.2 Think', 'OpenAI c/ raciocínio'),
+    ('claude-4.6-opus', '🎭🆕 Claude 4.6 Opus', 'NOVO! Anthropic'),
+    ('claude-4.6-opus-thinking', '🎭💭 Claude 4.6 Think', 'NOVO! c/ raciocínio'),
     ('claude-4.5-sonnet', '🎭 Claude Sonnet', 'Anthropic rápido'),
     ('claude-4.5-opus', '🎭✨ Claude Opus', 'Anthropic avançado'),
     ('gemini-3-flash', '💎 Gemini Flash', 'Google rápido'),
