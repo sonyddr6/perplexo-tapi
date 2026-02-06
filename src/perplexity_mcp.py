@@ -138,44 +138,8 @@ class ClientManager:
         # Se não tem coords, usa default
         if lat is None or lon is None:
             return self.default_client
-            
-        # Cria chave única para coords (arredondando para agrupar proximidade)
-        # 1 grau ~ 111km, 0.01 ~ 1.1km. Vamos usar 2 casas decimais (~1km precision)
-        key = f"{lat:.2f},{lon:.2f}"
         
-        if key in self.location_clients:
-            return self.location_clients[key]
-            
-        # Cria novo cliente com coords
-        if SCRAPER_AVAILABLE and Perplexity and self.session_token:
-            try:
-                # Tenta criar config com coords
-                logger.info(f"📍 Criando novo cliente para local: {key}")
-                from perplexity_webui_scraper import Coordinates, ClientConfig
-                
-                # Nota: Na versão atual da lib, Coordinates pode ser passado no construtor?
-                # Vamos assumir que sim ou via config
-                # ClientConfig é passado no create_conversation, mas precisamos do Client configurado?
-                # A lib parece não expor Coordinates no __init__ do Perplexity, 
-                # mas vamos tentar passar config se possível ou ignorar se não suportado.
-                
-                # Investigação mostrou que ClientConfig aceita coordinates.
-                # E Perplexity aceita config?
-                # Não, Perplexity(session_token). 
-                # Mas create_conversation aceita config.
-                # ENTÃO: Não precisamos de múltiplos clientes! O mesmo cliente pode criar conversas com configs diferentes?
-                # Se a lib suporta isso, ótimo. Se não, (Coordinates geralmente vai no ClientConfig da conversa)
-                # Vamos verificar o teste: ClientConfig(coordinates=coords). create_conversation(config).
-                
-                # Se Coordinates vai no ConversationConfig, então só precisamos de UM cliente!
-                # E passamos Coordinates na hora de criar a conversa.
-                
-                return self.default_client
-                
-            except Exception as e:
-                logger.warning(f"Erro ao criar cliente local: {e}")
-                return self.default_client
-                
+        # Sempre usa o cliente default (localização fixa: Brasil)
         return self.default_client
 
 client_manager = ClientManager()
@@ -790,20 +754,16 @@ def search():
             if TimeRange is not None:
                 config_kwargs["time_range"] = get_time_range(time_range_id)
             
-            # Adiciona coordenadas se fornecidas
-            lat = data.get('lat')
-            lon = data.get('lon')
-            if lat is not None and lon is not None:
-                try:
-                    from perplexity_webui_scraper import Coordinates
-                    config_kwargs["coordinates"] = Coordinates(
-                        latitude=float(lat), 
-                        longitude=float(lon), 
-                        accuracy=20.0
-                    )
-                    logger.info(f"📍 Configurando busca local: {lat}, {lon}")
-                except Exception as e:
-                    logger.warning(f"Erro ao configurar coords: {e}")
+            # Localização fixa: Brasil (Brasília)
+            try:
+                from perplexity_webui_scraper import Coordinates
+                config_kwargs["coordinates"] = Coordinates(
+                    latitude=-15.7801,   # Brasília, Brasil
+                    longitude=-47.9292,
+                    accuracy=100.0
+                )
+            except Exception:
+                pass  # Coordinates não disponível na lib
 
             # Adiciona source_focus apenas se disponível
             if SourceFocus is not None:
