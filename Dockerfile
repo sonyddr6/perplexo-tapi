@@ -36,8 +36,7 @@ COPY src/ ./src/
 # Copia scripts de refresh
 COPY scripts/ ./scripts/
 
-# Copia arquivos de dados (tokens e cookies do GitHub)
-COPY data/tokens/*.json ./data/tokens/
+# Tokens são injetados via variáveis de ambiente no runtime (Coolify)
 
 # Variáveis de ambiente
 ENV PYTHONUNBUFFERED=1
