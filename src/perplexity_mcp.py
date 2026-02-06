@@ -17,6 +17,7 @@ Uso:
 
 import os
 import sys
+import re
 import base64
 import tempfile
 import logging
@@ -173,11 +174,21 @@ logger.info(f"📁 Diretório de conversas: {CONVERSATIONS_DIR.absolute()}")
 
 def _sanitize_path_component(value: str) -> str:
     """Sanitiza um valor para uso seguro em caminhos de arquivo, prevenindo path traversal."""
-    import re
     # Remove caracteres perigosos de path traversal e mantém apenas alfanuméricos, hífens e underscores
     sanitized = re.sub(r'[^a-zA-Z0-9_\-]', '_', str(value))
     # Previne nomes vazios
     return sanitized or 'unknown'
+
+
+def _safe_conversations_path(*parts: str) -> Optional[Path]:
+    """Constrói um caminho seguro dentro de CONVERSATIONS_DIR, validando contra path traversal."""
+    sanitized_parts = [_sanitize_path_component(p) for p in parts]
+    target = CONVERSATIONS_DIR.joinpath(*sanitized_parts)
+    # Verifica que o caminho resolvido está dentro de CONVERSATIONS_DIR
+    if not target.resolve().is_relative_to(CONVERSATIONS_DIR.resolve()):
+        logger.warning(f"⚠️ Tentativa de path traversal bloqueada: {parts}")
+        return None
+    return target
 
 
 def save_conversation(user_id: str) -> Optional[str]:
@@ -212,13 +223,14 @@ def save_conversation(user_id: str) -> Optional[str]:
         "messages": conversation_messages[user_id]
     }
     
-    # Cria pasta do usuário (sanitiza para prevenir path traversal)
-    safe_user_id = _sanitize_path_component(user_id)
-    user_dir = CONVERSATIONS_DIR / safe_user_id
+    # Cria pasta do usuário (sanitiza e valida para prevenir path traversal)
+    user_dir = _safe_conversations_path(user_id)
+    if user_dir is None:
+        return None
     user_dir.mkdir(parents=True, exist_ok=True)
     
     # Salva arquivo
-    file_path = user_dir / f"{conv_id}.json"
+    file_path = user_dir / f"{_sanitize_path_component(conv_id)}.json"
     with open(file_path, 'w', encoding='utf-8') as f:
         json.dump(conversation_data, f, ensure_ascii=False, indent=2)
     
@@ -230,8 +242,8 @@ def list_saved_conversations(user_id: str) -> List[Dict[str, Any]]:
     """
     Lista todas as conversas salvas de um usuário.
     """
-    user_dir = CONVERSATIONS_DIR / _sanitize_path_component(user_id)
-    if not user_dir.exists():
+    user_dir = _safe_conversations_path(user_id)
+    if user_dir is None or not user_dir.exists():
         return []
     
     conversations = []
@@ -255,7 +267,10 @@ def load_conversation(user_id: str, conv_id: str) -> Optional[Dict[str, Any]]:
     """
     Carrega uma conversa salva pelo ID.
     """
-    file_path = CONVERSATIONS_DIR / _sanitize_path_component(user_id) / f"{_sanitize_path_component(conv_id)}.json"
+    user_dir = _safe_conversations_path(user_id)
+    if user_dir is None:
+        return None
+    file_path = user_dir / f"{_sanitize_path_component(conv_id)}.json"
     if not file_path.exists():
         return None
     
@@ -271,7 +286,10 @@ def delete_saved_conversation(user_id: str, conv_id: str) -> bool:
     """
     Deleta uma conversa salva.
     """
-    file_path = CONVERSATIONS_DIR / _sanitize_path_component(user_id) / f"{_sanitize_path_component(conv_id)}.json"
+    user_dir = _safe_conversations_path(user_id)
+    if user_dir is None:
+        return False
+    file_path = user_dir / f"{_sanitize_path_component(conv_id)}.json"
     if file_path.exists():
         file_path.unlink()
         logger.info(f"[🗑️ DELETE] Conversa {conv_id} deletada")
