@@ -85,7 +85,6 @@ try:
     Perplexity = _Perplexity
     ConversationConfig = _ConversationConfig
     Models = _Models
-    Models = _Models
     CitationMode = _CitationMode
     
     # Tenta importar TimeRange e SourceFocus
@@ -172,6 +171,15 @@ CONVERSATIONS_DIR.mkdir(parents=True, exist_ok=True)
 logger.info(f"📁 Diretório de conversas: {CONVERSATIONS_DIR.absolute()}")
 
 
+def _sanitize_path_component(value: str) -> str:
+    """Sanitiza um valor para uso seguro em caminhos de arquivo, prevenindo path traversal."""
+    import re
+    # Remove caracteres perigosos de path traversal e mantém apenas alfanuméricos, hífens e underscores
+    sanitized = re.sub(r'[^a-zA-Z0-9_\-]', '_', str(value))
+    # Previne nomes vazios
+    return sanitized or 'unknown'
+
+
 def save_conversation(user_id: str) -> Optional[str]:
     """
     Salva a conversa atual do usuário em um arquivo JSON.
@@ -204,8 +212,9 @@ def save_conversation(user_id: str) -> Optional[str]:
         "messages": conversation_messages[user_id]
     }
     
-    # Cria pasta do usuário
-    user_dir = CONVERSATIONS_DIR / user_id
+    # Cria pasta do usuário (sanitiza para prevenir path traversal)
+    safe_user_id = _sanitize_path_component(user_id)
+    user_dir = CONVERSATIONS_DIR / safe_user_id
     user_dir.mkdir(parents=True, exist_ok=True)
     
     # Salva arquivo
@@ -221,7 +230,7 @@ def list_saved_conversations(user_id: str) -> List[Dict[str, Any]]:
     """
     Lista todas as conversas salvas de um usuário.
     """
-    user_dir = CONVERSATIONS_DIR / user_id
+    user_dir = CONVERSATIONS_DIR / _sanitize_path_component(user_id)
     if not user_dir.exists():
         return []
     
@@ -246,7 +255,7 @@ def load_conversation(user_id: str, conv_id: str) -> Optional[Dict[str, Any]]:
     """
     Carrega uma conversa salva pelo ID.
     """
-    file_path = CONVERSATIONS_DIR / user_id / f"{conv_id}.json"
+    file_path = CONVERSATIONS_DIR / _sanitize_path_component(user_id) / f"{_sanitize_path_component(conv_id)}.json"
     if not file_path.exists():
         return None
     
@@ -262,7 +271,7 @@ def delete_saved_conversation(user_id: str, conv_id: str) -> bool:
     """
     Deleta uma conversa salva.
     """
-    file_path = CONVERSATIONS_DIR / user_id / f"{conv_id}.json"
+    file_path = CONVERSATIONS_DIR / _sanitize_path_component(user_id) / f"{_sanitize_path_component(conv_id)}.json"
     if file_path.exists():
         file_path.unlink()
         logger.info(f"[🗑️ DELETE] Conversa {conv_id} deletada")
@@ -427,9 +436,10 @@ def tokens_validate_get(): # Renamed to avoid conflict with POST route
         return jsonify({"error": "TokenManager não disponível"}), 503
     
     is_valid = token_manager.validate_token()
+    current_token = token_manager.get_current_token()
     return jsonify({
         "valid": is_valid,
-        "token_preview": token_manager.get_current_token()[:15] + "..." if token_manager.get_current_token() else None
+        "token_preview": current_token[:15] + "..." if current_token else None
     })
 
 # Renovação inteligente de token via browser_cookies.json
@@ -1189,7 +1199,7 @@ def diagnostics():
         try:
             with urllib.request.urlopen('https://api.ipify.org', timeout=5) as response:
                 result['public_ip'] = response.read().decode('utf-8')
-        except:
+        except Exception:
              # Fallback
              with urllib.request.urlopen('https://ifconfig.me/ip', timeout=5) as response:
                 result['public_ip'] = response.read().decode('utf-8').strip()

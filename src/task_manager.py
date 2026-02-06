@@ -154,7 +154,7 @@ class TaskManager:
                 job_id = f"task_{user_id}_{task_id}"
                 try:
                     self.scheduler.remove_job(job_id)
-                except:
+                except Exception:
                     pass
             
             logger.info(f"🗑️ Tarefa removida: {task_id}")
@@ -174,7 +174,7 @@ class TaskManager:
         # Remove job anterior se existir
         try:
             self.scheduler.remove_job(job_id)
-        except:
+        except Exception:
             pass
         
         # Parse horário

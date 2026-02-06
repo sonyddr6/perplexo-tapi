@@ -97,13 +97,11 @@ def get_user_config(user_id: int) -> Dict[str, Any]:
         'model': 'sonar',
         'focus': 'web',
         'mode': 'busca',
-        'reasoning': False,
-        'return_images': True,
-        'mode': 'busca',
         'time_range': 'all',
         'reasoning': False,
         'return_images': True,
-        'return_citations': True
+        'return_citations': True,
+        'save_to_library': False
     })
 
 
@@ -149,28 +147,6 @@ TIME_RANGES = [
 
 
 # ============= SETUP DOS COMANDOS =============
-
-async def post_init(application: Application) -> None:
-    """Registra comandos no menu do Telegram"""
-    commands = [
-        BotCommand("start", "🏠 Menu Principal"),
-        BotCommand("modelos", "🤖 Escolher Modelo AI"),
-        BotCommand("busca", "🔍 Modo de Busca (Focus)"),
-        BotCommand("denovo", "🔄 Tentar Novamente (Retry)"),
-        BotCommand("tempo", "📅 Filtro de Tempo"),
-        BotCommand("new", "✨ Nova Conversa"),
-        BotCommand("library", "📚 Save Cloud (Toggle)"),
-        BotCommand("token", "🔑 Atualizar Token"),
-        BotCommand("historico", "📂 Histórico salvo"),
-        BotCommand("teste", "🕵️ Diagnóstico"),
-        BotCommand("importar", "📥 Importar Contexto"),
-        BotCommand("normal", "💬 Conversa Normal"),
-        BotCommand("config", "⚙️ Configurações"),
-        BotCommand("limpar", "🗑️ Limpar Histórico"),
-        BotCommand("ajuda", "❓ Guia de Uso")
-    ]
-    await application.bot.set_my_commands(commands)
-    logger.info("✅ Comandos registrados no menu do Telegram")
 
 
 # ============= COMANDO /start =============
@@ -686,7 +662,7 @@ async def cmd_historico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 from datetime import datetime
                 dt = datetime.fromisoformat(conv.get('created_at'))
                 date_fmt = dt.strftime("%d/%m %H:%M")
-            except:
+            except Exception:
                 date_fmt = date_str
             
             # Adiciona ao texto
@@ -1053,7 +1029,7 @@ async def cmd_vpn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 status_resp = await client.get(f"{VPN_API}/v1/openvpn/status")
                 status_data = status_resp.json()
                 vpn_status = status_data.get('status', 'unknown')
-            except:
+            except Exception:
                 vpn_status = 'offline'
             
             # Obtém IP público
@@ -1061,7 +1037,7 @@ async def cmd_vpn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 ip_resp = await client.get(f"{VPN_API}/v1/publicip/ip")
                 ip_data = ip_resp.json()
                 public_ip = ip_data.get('public_ip', 'Desconhecido')
-            except:
+            except Exception:
                 public_ip = 'Erro ao obter'
             
             # Emoji de status
@@ -1144,79 +1120,6 @@ async def handle_vpn_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text(f"❌ Erro: {e}", parse_mode='Markdown')
     
     return True
-
-
-# ============= COMANDO /token =============
-async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Gerenciador de Tokens (Dashboard)"""
-    
-    # Suporte a callback
-    if update.callback_query:
-        await update.callback_query.answer()
-        reply_method = update.callback_query.edit_message_text
-    else:
-        msg = await update.message.reply_text("🔄 *Carregando painel de tokens...*", parse_mode='Markdown')
-        reply_method = msg.edit_text
-
-    # Se usuário passou argumento: /token <sess> (Modo Manual)
-    if context.args:
-        token = context.args[0]
-        try:
-            await update.message.delete()
-        except: pass
-        
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(f"{MCP_API}/config/token", json={"token": token})
-                if resp.status_code == 200:
-                    await reply_method("✅ *Token Inserido Manualmente!*", parse_mode='Markdown')
-                else:
-                    await reply_method(f"❌ Erro: {resp.text}", parse_mode='Markdown')
-        except Exception as e:
-            await reply_method(f"❌ Erro de conexão: {e}", parse_mode='Markdown')
-        return
-
-    # Modo Dashboard
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            status_resp = await client.get(f"{MCP_API}/tokens/status")
-            try:
-                status = status_resp.json()
-            except:
-                status = {}
-            
-        current = status.get('current_account', {})
-        total = status.get('total_accounts', 0)
-        idx = status.get('current_index', 0) + 1
-        is_active = status.get('active', False)
-        
-        status_emoji = "🟢" if is_active else "🔴"
-        
-        text = (
-            f"🔑 *Gestão de Tokens* {status_emoji}\n\n"
-            f"👤 *Conta:* `{current.get('email', 'N/A')}`\n"
-            f"🏷️ *Nome:* {current.get('name', 'N/A')}\n"
-            f"🔢 *Índice:* {idx}/{total}\n"
-            f"📅 *Validade:* {current.get('expires', 'Desconhecida')}\n\n"
-            f"_Selecione uma ação:_"
-        )
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Validar", callback_data='token_validate'),
-                InlineKeyboardButton("🔄 Rotação (Next)", callback_data='token_rotate')
-            ],
-            [
-                InlineKeyboardButton("🆕 Novo Refresh OTP", callback_data='token_new_refresh')
-            ],
-            [InlineKeyboardButton("🔙 Voltar", callback_data='back_main')]
-        ]
-        
-        await reply_method(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-        
-    except Exception as e:
-        logger.error(f"Erro cmd_token: {e}")
-        await reply_method(f"❌ Erro ao carregar painel: {e}", parse_mode='Markdown')
 
 
 # ============= COMANDO /teste =============
@@ -1504,9 +1407,7 @@ async def extract_and_send_files(update: Update, text: str) -> str:
         except Exception as e:
             logger.error(f"Erro code-to-file: {e}")
             
-    return clean_text 
-
-    return clean_text 
+    return clean_text
 
 
 async def stream_search_and_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, payload: dict):
@@ -1602,7 +1503,7 @@ async def stream_search_and_reply(update: Update, context: ContextTypes.DEFAULT_
                                 # Fallback para raw em caso de erro de parse
                                 try:
                                     await msg.edit_text(display_text)
-                                except:
+                                except Exception:
                                     pass
                                     
                             last_update_time = current_time
@@ -1723,6 +1624,25 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Gerencia tokens do Perplexity (Status, Validação, Rotação)"""
     user_id = update.effective_user.id
+    
+    # Se usuário passou argumento: /token <sess> (Modo Manual)
+    if context.args and update.message:
+        token = context.args[0]
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as http_client:
+                resp = await http_client.post(f"{MCP_API}/config/token", json={"token": token})
+                if resp.status_code == 200:
+                    await update.effective_chat.send_message("✅ *Token Inserido Manualmente!*", parse_mode='Markdown')
+                else:
+                    await update.effective_chat.send_message(f"❌ Erro: {resp.text}", parse_mode='Markdown')
+        except Exception as e:
+            await update.effective_chat.send_message(f"❌ Erro de conexão: {e}", parse_mode='Markdown')
+        return
     
     # Verifica status via MCP
     try:
@@ -2231,7 +2151,7 @@ def main() -> None:
                                     full_answer += data['chunk']
                                 if "answer" in data:
                                     full_answer = data['answer']
-                            except:
+                            except Exception:
                                 pass
                     
                     # Envia notificação via Telegram

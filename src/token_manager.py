@@ -75,7 +75,6 @@ class TokenManager:
         self._env_token = os.getenv("PERPLEXITY_SESSION_TOKEN", "")
         
         # Carrega tokens
-        # Carrega tokens
         self.reload_tokens()
     
     def _load_raw_tokens(self) -> List[Dict[str, str]]:
