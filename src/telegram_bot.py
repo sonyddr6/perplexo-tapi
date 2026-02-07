@@ -2165,8 +2165,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # ============= HANDLER DE ÁUDIO (Voice Notes) =============
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Processa mensagens de voz e arquivos de áudio, enviando ao MCP"""
+    """Processa mensagens de voz e arquivos de áudio, enviando direto ao MCP"""
     user_id = update.effective_user.id
+    config = get_user_config(user_id)
     
     # Pega o áudio (voice ou audio)
     if update.message.voice:
@@ -2183,45 +2184,44 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("❌ Formato de áudio não reconhecido.")
         return
     
+    # Usa caption se houver, senão pergunta padrão
+    query = update.message.caption or "Analise este áudio e descreva o conteúdo."
+    
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    msg = await update.message.reply_text(f"🎤 Processando áudio ({duration}s)...")
     
     try:
         # Download do áudio
         telegram_file = await audio.get_file()
         audio_bytes = await telegram_file.download_as_bytearray()
+        audio_b64 = base64.b64encode(bytes(audio_bytes)).decode()
         
-        # Adiciona ao buffer de arquivos pendentes (igual documento)
-        if user_id not in pending_files:
-            pending_files[user_id] = []
+        # Envia direto ao MCP
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            payload = {
+                "query": query,
+                "user_id": str(user_id),
+                "model": config['model'],
+                "focus": config['focus'],
+                "files": [{
+                    "name": file_name,
+                    "data": audio_b64,
+                    "mime": mime_type
+                }]
+            }
+            
+            response = await client.post(f"{MCP_API}/search", json=payload)
+            response.raise_for_status()
+            data = response.json()
         
-        # Limpa arquivos antigos
-        current_time = time.time()
-        pending_files[user_id] = [
-            f for f in pending_files[user_id] 
-            if current_time - f['timestamp'] < FILE_TIMEOUT_SECONDS
-        ]
+        answer = data.get('answer', 'Sem resposta do MCP')
         
-        # Adiciona áudio ao buffer
-        pending_files[user_id].append({
-            'name': file_name,
-            'bytes': bytes(audio_bytes),
-            'mime': mime_type,
-            'timestamp': current_time
-        })
-        
-        count = len(pending_files[user_id])
-        duration_str = f" ({duration}s)" if duration else ""
-        
-        await update.message.reply_text(
-            f"🎤 *Áudio recebido!*{duration_str}\n"
-            f"📎 Total: {count} arquivo(s) no buffer\n\n"
-            f"Agora digite sua pergunta sobre o áudio, ou envie mais arquivos.",
-            parse_mode='Markdown'
-        )
+        # Envia resposta  
+        await msg.edit_text(f"🎤 *Resposta:*\n\n{answer}", parse_mode='Markdown')
         
     except Exception as e:
-        logger.error(f"Erro ao receber áudio: {e}")
-        await update.message.reply_text(f"❌ Erro ao processar áudio: {e}")
+        logger.error(f"Erro ao processar áudio: {e}")
+        await msg.edit_text(f"❌ Erro: {e}")
 
 
 # ============= POST INIT =============
