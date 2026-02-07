@@ -41,6 +41,14 @@ except ImportError:
 # Task Manager local
 from task_manager import Task, init_task_manager, get_task_manager
 
+# TTS Inworld (para RESPOSTA_SIMPLES)
+try:
+    from inworld_tts import generate_audio_bytes, is_tts_available
+    TTS_ENABLED = is_tts_available()
+except ImportError:
+    TTS_ENABLED = False
+    def generate_audio_bytes(text, voice_id=None): return None
+
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -1645,8 +1653,29 @@ async def stream_search_and_reply(update: Update, context: ContextTypes.DEFAULT_
             # A função extract_and_send_files agora é robusta e retorna o texto SEM os blocos de código
             clean_text = await extract_and_send_files(update, final_text)
             
-            # 2. Atualiza a mensagem final
+            # 2. Detecta e processa RESPOSTA_SIMPLES:(((texto)))
+            tts_text = None
+            tts_match = re.search(r'RESPOSTA_SIMPLES:\(\(\((.*?)\)\)\)', clean_text, re.DOTALL)
+            if tts_match:
+                tts_text = tts_match.group(1).strip()
+                # Remove o padrão do texto final
+                clean_text = re.sub(r'RESPOSTA_SIMPLES:\(\(\(.*?\)\)\)', '', clean_text, flags=re.DOTALL).strip()
+            
+            # 3. Atualiza a mensagem final
             await msg.edit_text(clean_text, parse_mode='Markdown', disable_web_page_preview=True)
+            
+            # 4. Gera e envia áudio TTS se houver
+            if tts_text and TTS_ENABLED:
+                try:
+                    logger.info(f"🎙️ Gerando TTS para: {tts_text[:50]}...")
+                    audio_bytes = generate_audio_bytes(tts_text)
+                    if audio_bytes:
+                        from io import BytesIO
+                        audio_file = BytesIO(audio_bytes)
+                        audio_file.name = "resposta.mp3"
+                        await update.message.reply_voice(audio_file)
+                except Exception as tts_error:
+                    logger.error(f"Erro TTS: {tts_error}")
             
         except Exception as e:
             logger.error(f"Erro ao finalizar msg: {e}")
