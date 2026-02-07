@@ -2149,12 +2149,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         })
         
         count = len(pending_files[user_id])
-        file_list = "\n".join([f"  • {f['name']}" for f in pending_files[user_id]])
+        file_list = "\n".join([f"  • {f['name'].replace('_', ' ')}" for f in pending_files[user_id]])
         
         await update.message.reply_text(
-            f"📎 *{count} arquivo(s) recebido(s):*\n{file_list}\n\n"
-            f"Envie mais arquivos (até {MAX_PENDING_FILES}) ou digite sua pergunta para processar.",
-            parse_mode='Markdown'
+            f"📎 {count} arquivo(s) recebido(s):\n{file_list}\n\n"
+            f"Envie mais arquivos (até {MAX_PENDING_FILES}) ou digite sua pergunta para processar."
         )
         
     except Exception as e:
@@ -2203,12 +2202,11 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         })
         
         count = len(pending_files[user_id])
-        file_list = "\n".join([f"  • {f['name']}" for f in pending_files[user_id]])
+        file_list = "\n".join([f"  • {f['name'].replace('_', ' ')}" for f in pending_files[user_id]])
         
         await update.message.reply_text(
-            f"📎 *{count} arquivo(s) recebido(s):*\n{file_list}\n\n"
-            f"Envie mais arquivos (até {MAX_PENDING_FILES}) ou digite sua pergunta.",
-            parse_mode='Markdown'
+            f"📎 {count} arquivo(s) recebido(s):\n{file_list}\n\n"
+            f"Envie mais arquivos (até {MAX_PENDING_FILES}) ou digite sua pergunta."
         )
         
     except Exception as e:
