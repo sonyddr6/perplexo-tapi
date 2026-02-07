@@ -10,7 +10,7 @@ import random
 import logging
 import os
 from functools import wraps
-from datetime import datetime
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +18,11 @@ logger = logging.getLogger(__name__)
 # CONFIGURAÇÕES
 # ============================================================
 
-WORKSPACE_ID = os.getenv("WORKSPACE_ID", "default--pb4bm1oowkem_r9ri2wiw")
+WORKSPACE_ID = os.getenv("WORKSPACE_ID", "")
 BASE_URL = "https://api.inworld.ai"
-FIREBASE_API_KEY = os.getenv("FIREBASE_API_KEY", "AIzaSyAPVBLVid0xPwjuU4Gmn_6_GyqxBq-SwQs")
+FIREBASE_API_KEY = os.getenv("FIREBASE_API_KEY", "")
 FIREBASE_REFRESH_TOKEN = os.getenv("FIREBASE_REFRESH_TOKEN", "")
-TTS_VOICE_ID = os.getenv("TTS_VOICE_ID", "default--pb4bm1oowkem_r9ri2wiw__sony")
+TTS_VOICE_ID = os.getenv("TTS_VOICE_ID", "")
 
 # Token em memória (será renovado automaticamente)
 _current_token = os.getenv("INWORLD_TOKEN", "")
@@ -76,6 +76,7 @@ def refresh_firebase_token():
 
 def generate_tts_token(firebase_token):
     """Gera token TTS usando endpoint do portal Inworld"""
+    global _token_expiry
     logger.info("🔄 Gerando token TTS...")
     
     url = f"https://platform.inworld.ai/ai/inworld/portal/v1alpha/workspaces/{WORKSPACE_ID}/token:generate"
@@ -95,6 +96,11 @@ def generate_tts_token(firebase_token):
             data = response.json()
             tts_token = data.get("token")
             expiration = data.get("expirationTime")
+            
+            # Parseia e armazena o tempo de expiração
+            if expiration:
+                _token_expiry = datetime.fromisoformat(expiration.replace('Z', '+00:00'))
+            
             logger.info(f"✅ Token TTS gerado! Expira: {expiration}")
             return tts_token
         else:
@@ -128,7 +134,18 @@ def auto_renew_token():
 
 def get_token():
     """Retorna token atual, renovando se necessário"""
-    global _current_token
+    global _current_token, _token_expiry
+    
+    # Verifica se token está próximo de expirar (5 minutos antes)
+    if _token_expiry:
+        now = datetime.now(_token_expiry.tzinfo) if _token_expiry.tzinfo else datetime.now()
+        time_until_expiry = _token_expiry - now
+        
+        # Renova se faltar menos de 5 minutos para expirar
+        if time_until_expiry.total_seconds() < 300:
+            logger.info("🔄 Token próximo de expirar, renovando...")
+            if FIREBASE_REFRESH_TOKEN:
+                auto_renew_token()
     
     if not _current_token and FIREBASE_REFRESH_TOKEN:
         auto_renew_token()
@@ -210,7 +227,7 @@ def generate_audio_bytes(text: str, voice_id: str = None) -> bytes:
     Returns:
         bytes do arquivo MP3 ou None se falhar
     """
-    if not TTS_AVAILABLE and not FIREBASE_REFRESH_TOKEN:
+    if not TTS_AVAILABLE:
         logger.error("TTS não disponível - configure INWORLD_TOKEN ou FIREBASE_REFRESH_TOKEN")
         return None
     
@@ -220,6 +237,13 @@ def generate_audio_bytes(text: str, voice_id: str = None) -> bytes:
     if len(text) > MAX_CARACTERES:
         logger.warning(f"Texto truncado: {len(text)} -> {MAX_CARACTERES} chars")
         text = text[:MAX_CARACTERES]
+        # Tenta cortar na última frase completa ou palavra
+        last_period = text.rfind('.')
+        last_space = text.rfind(' ')
+        if last_period > MAX_CARACTERES * 0.7:
+            text = text[:last_period + 1]
+        elif last_space > MAX_CARACTERES * 0.7:
+            text = text[:last_space]
     
     url = f"{BASE_URL}/tts/v1/workspaces/{WORKSPACE_ID}/tts:synthesize"
     

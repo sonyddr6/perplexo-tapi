@@ -28,6 +28,7 @@ import asyncio
 import json
 import re
 import time
+from io import BytesIO
 from typing import Dict, Any, Optional
 
 # APScheduler para tarefas agendadas
@@ -1668,14 +1669,19 @@ async def stream_search_and_reply(update: Update, context: ContextTypes.DEFAULT_
             if tts_text and TTS_ENABLED:
                 try:
                     logger.info(f"🎙️ Gerando TTS para: {tts_text[:50]}...")
-                    audio_bytes = generate_audio_bytes(tts_text)
+                    # Usa asyncio.to_thread para não bloquear o event loop
+                    audio_bytes = await asyncio.to_thread(generate_audio_bytes, tts_text)
                     if audio_bytes:
-                        from io import BytesIO
                         audio_file = BytesIO(audio_bytes)
                         audio_file.name = "resposta.mp3"
                         await update.message.reply_voice(audio_file)
                 except Exception as tts_error:
                     logger.error(f"Erro TTS: {tts_error}")
+                    # Informa o usuário sobre a falha
+                    try:
+                        await update.message.reply_text("⚠️ Não foi possível gerar o áudio desta vez.")
+                    except:
+                        pass
             
         except Exception as e:
             logger.error(f"Erro ao finalizar msg: {e}")
