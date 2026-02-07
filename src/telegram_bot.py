@@ -2162,6 +2162,68 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(f"❌ Erro ao receber arquivo: {e}")
 
 
+# ============= HANDLER DE ÁUDIO (Voice Notes) =============
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Processa mensagens de voz e arquivos de áudio, enviando ao MCP"""
+    user_id = update.effective_user.id
+    
+    # Pega o áudio (voice ou audio)
+    if update.message.voice:
+        audio = update.message.voice
+        file_name = f"voice_{audio.file_unique_id}.ogg"
+        mime_type = "audio/ogg"
+        duration = audio.duration
+    elif update.message.audio:
+        audio = update.message.audio
+        file_name = audio.file_name or f"audio_{audio.file_unique_id}.mp3"
+        mime_type = audio.mime_type or "audio/mpeg"
+        duration = audio.duration
+    else:
+        await update.message.reply_text("❌ Formato de áudio não reconhecido.")
+        return
+    
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    
+    try:
+        # Download do áudio
+        telegram_file = await audio.get_file()
+        audio_bytes = await telegram_file.download_as_bytearray()
+        
+        # Adiciona ao buffer de arquivos pendentes (igual documento)
+        if user_id not in pending_files:
+            pending_files[user_id] = []
+        
+        # Limpa arquivos antigos
+        current_time = time.time()
+        pending_files[user_id] = [
+            f for f in pending_files[user_id] 
+            if current_time - f['timestamp'] < FILE_TIMEOUT_SECONDS
+        ]
+        
+        # Adiciona áudio ao buffer
+        pending_files[user_id].append({
+            'name': file_name,
+            'bytes': bytes(audio_bytes),
+            'mime': mime_type,
+            'timestamp': current_time
+        })
+        
+        count = len(pending_files[user_id])
+        duration_str = f" ({duration}s)" if duration else ""
+        
+        await update.message.reply_text(
+            f"🎤 *Áudio recebido!*{duration_str}\n"
+            f"📎 Total: {count} arquivo(s) no buffer\n\n"
+            f"Agora digite sua pergunta sobre o áudio, ou envie mais arquivos.",
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        logger.error(f"Erro ao receber áudio: {e}")
+        await update.message.reply_text(f"❌ Erro ao processar áudio: {e}")
+
+
 # ============= POST INIT =============
 
 async def post_init(application: Application) -> None:
@@ -2285,6 +2347,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     
     # Webhook ou Polling
     if WEBHOOK_URL:
