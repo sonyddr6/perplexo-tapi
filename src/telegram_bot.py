@@ -1680,7 +1680,7 @@ async def stream_search_and_reply(update: Update, context: ContextTypes.DEFAULT_
                     # Informa o usuário sobre a falha
                     try:
                         await update.message.reply_text("⚠️ Não foi possível gerar o áudio desta vez.")
-                    except:
+                    except Exception:
                         pass
             
         except Exception as e:

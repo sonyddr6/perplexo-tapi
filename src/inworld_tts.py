@@ -31,6 +31,10 @@ _token_expiry = None
 # Limite de caracteres
 MAX_CARACTERES = 2000
 
+# Constantes de renovação e truncamento
+TOKEN_RENEWAL_THRESHOLD_SECONDS = 300  # Renova token 5 minutos antes de expirar
+TRUNCATION_THRESHOLD = 0.7  # 70% do limite para buscar último ponto/espaço
+
 # User-Agents para rotação
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/144.0.0.0 Safari/537.36",
@@ -142,7 +146,7 @@ def get_token():
         time_until_expiry = _token_expiry - now
         
         # Renova se faltar menos de 5 minutos para expirar
-        if time_until_expiry.total_seconds() < 300:
+        if time_until_expiry.total_seconds() < TOKEN_RENEWAL_THRESHOLD_SECONDS:
             logger.info("🔄 Token próximo de expirar, renovando...")
             if FIREBASE_REFRESH_TOKEN:
                 auto_renew_token()
@@ -240,9 +244,9 @@ def generate_audio_bytes(text: str, voice_id: str = None) -> bytes:
         # Tenta cortar na última frase completa ou palavra
         last_period = text.rfind('.')
         last_space = text.rfind(' ')
-        if last_period > MAX_CARACTERES * 0.7:
+        if last_period > MAX_CARACTERES * TRUNCATION_THRESHOLD:
             text = text[:last_period + 1]
-        elif last_space > MAX_CARACTERES * 0.7:
+        elif last_space > MAX_CARACTERES * TRUNCATION_THRESHOLD:
             text = text[:last_space]
     
     url = f"{BASE_URL}/tts/v1/workspaces/{WORKSPACE_ID}/tts:synthesize"
