@@ -2164,14 +2164,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # ============= HANDLER DE ÁUDIO (Voice Notes) =============
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Áudio vai direto ao MCP sem buffer"""
+    """Áudio vai direto ao MCP via multipart upload"""
     user_id = update.effective_user.id
     config = get_user_config(user_id)
     
     # Pega o áudio
     if update.message.voice:
         audio = update.message.voice
-        file_name = f"audio.ogg"
+        file_name = "audio.ogg"
         mime_type = "audio/ogg"
     elif update.message.audio:
         audio = update.message.audio
@@ -2187,27 +2187,22 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # Download
         telegram_file = await audio.get_file()
         audio_bytes = await telegram_file.download_as_bytearray()
-        audio_b64 = base64.b64encode(bytes(audio_bytes)).decode()
         
-        # Envia direto ao MCP
+        # Envia via multipart/form-data (como MCP espera)
         async with httpx.AsyncClient(timeout=180.0) as client:
-            payload = {
-                "query": ".",  # Ponto só pra enviar
+            files = {"file": (file_name, bytes(audio_bytes), mime_type)}
+            data = {
+                "query": ".",
                 "user_id": str(user_id),
                 "model": config['model'],
-                "focus": config['focus'],
-                "files": [{
-                    "name": file_name,
-                    "data": audio_b64,
-                    "mime": mime_type
-                }]
+                "focus": config['focus']
             }
             
-            response = await client.post(f"{MCP_API}/search", json=payload)
+            response = await client.post(f"{MCP_API}/search", data=data, files=files)
             response.raise_for_status()
-            data = response.json()
+            result = response.json()
         
-        answer = data.get('answer', '')
+        answer = result.get('answer', '')
         if answer:
             await update.message.reply_text(answer)
         
